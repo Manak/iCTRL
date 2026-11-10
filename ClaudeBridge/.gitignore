@@ -23,3 +23,6 @@ build/
 *.xcframework/
 *.a
 go/vendor/
+
+# SwiftPM build output
+.build/
