@@ -172,7 +172,10 @@ struct ClaudeBridgeView: View {
             // into "live" without a manual refresh.
             while !Task.isCancelled {
                 if admin.isPaired { await model.refresh() }
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                // Fast while something is changing, slow once it is settled:
+                // each poll is a line in the runner's log.
+                let settling = model.status.map { $0.mode == "funnel" && $0.tunnelState != "running" } ?? true
+                try? await Task.sleep(nanoseconds: settling ? 3_000_000_000 : 15_000_000_000)
             }
         }
         .confirmationDialog("Rotate the secret?", isPresented: $confirmRotate, titleVisibility: .visible) {

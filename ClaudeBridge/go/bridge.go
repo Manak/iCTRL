@@ -32,7 +32,13 @@ import (
 	"sync"
 	"time"
 
+	"crypto/tls"
+	"sync/atomic"
+
+	"tailscale.com/ipn/ipnext"
+	"tailscale.com/ipn/ipnlocal"
 	"tailscale.com/tsnet"
+	"tailscale.com/types/logger"
 )
 
 // maxBody matches the loopback listener's limit.
@@ -122,8 +128,13 @@ func run(ctx context.Context, srv *tsnet.Server, targetPort int) {
 	}
 
 	// FunnelOnly: reachable from the internet through Funnel, and not from
-	// other devices on the tailnet.
-	ln, err := srv.ListenFunnel("tcp", ":443", tsnet.FunnelOnly())
+	// other devices on the tailnet. The TLS config supplies the certificate
+	// ourselves; see certificate() for why tsnet's default cannot on iOS.
+	ln, err := srv.ListenFunnel("tcp", ":443", tsnet.FunnelOnly(), tsnet.FunnelTLSConfig(&tls.Config{
+		GetCertificate: certificate,
+		NextProtos:     []string{"http/1.1"},
+		MinVersion:     tls.VersionTLS12,
+	}))
 	if err != nil {
 		fail(fmt.Errorf("starting Funnel: %w", err))
 		return
@@ -149,9 +160,84 @@ func run(ctx context.Context, srv *tsnet.Server, targetPort int) {
 	cur = status{State: "running", Host: host}
 	mu.Unlock()
 
+	// Fetch the certificate now, so the first request does not wait for it
+	// and a failure shows up in the status instead of as a dropped handshake.
+	if host != "" {
+		go func() {
+			if _, err := certificate(&tls.ClientHelloInfo{ServerName: host}); err != nil && ctx.Err() == nil {
+				mu.Lock()
+				if cur.State == "running" {
+					cur.Error = "TLS certificate: " + err.Error()
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+
 	if err := h.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fail(fmt.Errorf("serving: %w", err))
 	}
+}
+
+// MARK: Certificates
+//
+// tsnet normally gets its certificate from the node's LocalAPI, but that
+// endpoint is compiled out on iOS. The certificate logic itself (ACME through
+// Tailscale's control plane) is still there in the backend, so this asks the
+// backend directly. The backend is reached through Tailscale's extension
+// hook, which hands every registered extension the backend it belongs to.
+
+var tsBackend atomic.Pointer[ipnlocal.LocalBackend]
+
+type certExtension struct{}
+
+func (certExtension) Name() string           { return "claudebridge-cert" }
+func (certExtension) Init(ipnext.Host) error { return nil }
+func (certExtension) Shutdown() error        { return nil }
+
+func init() {
+	ipnext.RegisterExtension("claudebridge-cert", func(_ logger.Logf, sb ipnext.SafeBackend) (ipnext.Extension, error) {
+		if lb, ok := sb.(*ipnlocal.LocalBackend); ok {
+			tsBackend.Store(lb)
+		}
+		return certExtension{}, nil
+	})
+}
+
+type cachedCert struct {
+	name  string
+	cert  *tls.Certificate
+	until time.Time
+}
+
+var certCache atomic.Pointer[cachedCert]
+
+// certificate returns the node's Tailscale-issued certificate for the name in
+// the TLS handshake. The backend keeps it on disk and renews it; this adds a
+// short in-memory cache so a handshake does not read the disk every time.
+func certificate(hi *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	if hi == nil || hi.ServerName == "" {
+		return nil, errors.New("no server name in TLS handshake")
+	}
+	if c := certCache.Load(); c != nil && c.name == hi.ServerName && time.Now().Before(c.until) {
+		return c.cert, nil
+	}
+	lb := tsBackend.Load()
+	if lb == nil {
+		return nil, errors.New("Tailscale backend not ready")
+	}
+	ctx, done := context.WithTimeout(context.Background(), time.Minute)
+	defer done()
+	pair, err := lb.GetCertPEM(ctx, hi.ServerName)
+	if err != nil {
+		return nil, err
+	}
+	cert, err := tls.X509KeyPair(pair.CertPEM, pair.KeyPEM)
+	if err != nil {
+		return nil, err
+	}
+	certCache.Store(&cachedCert{name: hi.ServerName, cert: &cert, until: time.Now().Add(time.Hour)})
+	return &cert, nil
 }
 
 // proxy forwards a request to the loopback MCP listener unchanged, except

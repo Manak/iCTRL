@@ -1,9 +1,8 @@
 # Stage 3: Tailscale (tsnet) and Funnel
 
-Status on 2026-11-10: the Go side is written and unit-tested on the Mac, builds
-as a static iOS library, and links into the runner (the `.xctest` binary is
-about 25 MB). **It has not yet been run on the phone**: that needs a Tailscale
-auth key and the tailnet policy below.
+Status on 2026-11-10: running on an iPhone (iOS 27.2). The public URL answers
+from outside, with a Let's Encrypt certificate issued through Tailscale. See
+"Tested on the phone" below for what was and was not checked.
 
 ## How it fits together
 
@@ -108,16 +107,40 @@ cd ClaudeBridge/go && go test ./...
 After adding a new Swift file under `ClaudeBridge/`, regenerate the project
 (`xcodegen generate`); `make` only does so when `project.yml` changes.
 
-## Still to verify on the phone
+## Tested on the phone
 
-1. The Go runtime runs alongside XCTest in the runner without disturbing it.
-2. Login with the tagged key, and Funnel answering from outside.
-3. Certificate issue time on first start, reuse on later starts.
-4. Memory and idle CPU with tsnet running.
-5. The endpoint survives an hour in the background, on Wi-Fi and cellular.
-6. Stopping the runner removes the endpoint; the old URL then fails.
-7. With Funnel mode on, port 8200 refuses LAN connections even if remote
-   access was enabled before.
+| Check | Result |
+|---|---|
+| Go runtime inside the runner | Runs alongside XCTest; all tools, keep-awake and the runner's own server behave as before |
+| Login | Joined the tailnet as `ictrl-phone` with a `tag:ictrl` key entered in the companion app |
+| Certificate | Let's Encrypt, issued on the first request (that request took about 35 s and failed; the next ones were normal) |
+| MCP over the public URL | `initialize`, `tools/list` and tool calls work; 0.65 to 1.3 s per call from a Mac on another network path |
+| Wrong secret, root, `/.well-known/…` | plain `404 page not found` |
+| Raw API paths (`/schema`, `/rpc`, `/pair`) through Funnel | 404: the raw API is not proxied |
+| Raw API over Wi-Fi in Funnel mode | Refused: port 8200 is bound to loopback (`localOnly=true` in the log) |
+| Runner stopped | The URL stops answering at once (connections time out) |
+| Runner restarted | Same URL live again about 4 s after start, certificate reused, no auth key needed |
+| Secret in the runner log | Absent |
+
+Not yet checked: a reboot, cellular, an hour in the background, memory and
+idle CPU with tsnet running, a graceful stop from the notification while in
+Funnel mode, and the Claude app itself as the client.
+
+### The certificate problem found on the phone
+
+The first build reported "live" but every TLS handshake was dropped. tsnet
+gets its certificate from the node's LocalAPI, and that endpoint is compiled
+out on iOS (in Tailscale 1.104.5 and on main). The certificate logic itself is
+still present in the backend, so `ClaudeBridge/go/bridge.go` now registers a
+small Tailscale extension to get hold of the backend, asks it for the
+certificate directly, and hands that to `ListenFunnel` through
+`tsnet.FunnelTLSConfig`. It also fetches the certificate as soon as the
+listener is up and reports a failure in the status, instead of failing
+silently per handshake.
+
+This depends on Tailscale internals (`ipnext.RegisterExtension`, the backend
+being passed as `*ipnlocal.LocalBackend`, `GetCertPEM`). Re-test Funnel after
+changing the Tailscale version in `go.mod`.
 
 ## Keep-awake while a session runs
 
