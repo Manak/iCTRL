@@ -117,6 +117,11 @@ final class ClaudeBridgeRunner {
         let allowlist = ClaudeBridgeAllowlistStore()
         let clock = BridgeSystemClock()
         let guardian = BridgeGuard(raw: raw, allowlist: allowlist)
+        // The bridge decides what is in front itself, from process ids; the
+        // raw API's answer is wrong when an app is shown in a window.
+        guardian.screenInspector = { _, _ in
+            ClaudeBridgeScreenProbe.inspect(allowlist: allowlist)
+        }
         guardian.onLockout = { Self.log("🤖⛔️ Claude bridge locked out: non-allowlisted app in foreground") }
         let keepAwake = BridgeKeepAwake(
             clock: clock,
@@ -469,6 +474,39 @@ enum ClaudeBridgeDiagnostics {
             if line != last {
                 last = line
                 log("🤖🔬 \(line)")
+                // Level 2: also dump the shape of the system UI trees (type,
+                // short label, frame), to see how windows are laid out.
+                if ProcessInfo.processInfo.environment["ICTRL_BRIDGE_DIAG_APPS"] == "1" {
+                    // Per-app view: what XCTest says about each allowed app.
+                    var rows: [String] = []
+                    DispatchQueue.main.sync {
+                        let frontPID = ForegroundApp.frontmostPID()
+                        rows.append("frontPID=\(frontPID) campoPID=\(ForegroundApp.processID(forBundleID: "com.apple.campo")) campoState=\(ForegroundApp.appState(forBundleID: "com.apple.campo"))")
+                        for app in ClaudeBridgeAllowlistStore().allowedApps + BridgeGuard.systemSurfaces {
+                            let state = ForegroundApp.appState(forBundleID: app.bundleID)
+                            guard state >= 3 else { continue }   // only apps that claim to be running in front or background-active
+                            rows.append("\(app.bundleID) state=\(state) pid=\(ForegroundApp.processID(forBundleID: app.bundleID))")
+                        }
+                    }
+                    log("🤖🔬 apps: " + rows.joined(separator: " | "))
+                }
+                if ProcessInfo.processInfo.environment["ICTRL_BRIDGE_DIAG_TREES"] == "1" {
+                    for bundle in [BridgeGuard.springboard, "com.apple.campo"] {
+                        guard case .success(let page) = raw.call("page_source", ["bundle_id": bundle, "visible_only": true, "max_children": 60]),
+                              let source = page["source"] as? String else { log("🤖🔬 tree \(bundle): unavailable"); continue }
+                        let tree = BridgeUITree(source: source)
+                        log("🤖🔬 tree \(bundle): \(tree.nodes.count) nodes")
+                        var seen = Set<String>()
+                        for node in tree.nodes where node.frame.width >= 200 && node.frame.width < 460 && node.frame.height >= 300 {
+                            let key = "\(Int(node.frame.x)),\(Int(node.frame.y)) \(Int(node.frame.width))x\(Int(node.frame.height))"
+                            if seen.insert(key).inserted { log("🤖🔬   candidate window frame \(key) type=\(node.type) id=\((node.identifier ?? "").prefix(40)) l=\((node.label ?? "").prefix(20))") }
+                        }
+                        for node in tree.nodes.prefix(0) {
+                            let label = (node.label ?? "").prefix(28)
+                            log("🤖🔬   " + String(repeating: " ", count: min(node.depth, 16)) + "\(node.type) l=\(label) id=\((node.identifier ?? "").prefix(36)) \(Int(node.frame.x)),\(Int(node.frame.y)) \(Int(node.frame.width))x\(Int(node.frame.height))")
+                        }
+                    }
+                }
             }
         }
         t.resume()

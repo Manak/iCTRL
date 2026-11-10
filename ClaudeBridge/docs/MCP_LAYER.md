@@ -217,3 +217,33 @@ the list, and the basket total changed to match.
 
 Not handled: horizontal scrolling to an element, and lists that only build
 rows as you scroll are searched by paging down only (not up).
+
+## Large-display (windowed) mode: what works and what does not
+
+The phone this is developed on has a second, larger display mode. In it iOS
+lays the screen out at 669 x 951 points while the runner works at 466 x 678,
+iPhone-only apps are shown in a window, and the home screen is drawn by the
+system search process ("Siri AI", `com.apple.campo`, the window host), not by
+SpringBoard. Found while trying to search Carousell:
+
+| Area | State |
+|---|---|
+| Which app is in front | **Fixed.** iCTRL named the wrong app (Taobao while Carousell was on screen): it trusts an app's "foreground" state, which lags, and the frontmost process is the window host. The bridge now decides itself (`ClaudeBridgeScreenProbe`, `BridgeForegroundDecision`): a process id must agree, and in windowed mode exactly one known app may claim the foreground. iCTRL's own resolver also got a process-id check (hook in `ActionHandler.swift`). |
+| `read_ui` | **Fixed.** It names the app explicitly (the raw API otherwise read the wrong app and timed out after 15 s), and converts frames using the window's real position, read from SpringBoard's tree (`BridgeWindowLocator`). |
+| `launch_app`, `screenshot` | Work. |
+| `tap`, `tap_element`, `type_text`, `scroll`, `swipe` | **Do not work in this mode.** Synthesized touches take about 5.4 s and have no effect, in either coordinate space. Likely cause, not confirmed: XCTest aims events at the default display, and the content is on the other one (`XCSynthesizedEventRecord` has an `initWithName:displayID:` that upstream does not use). |
+| `go_home` | Does not reach a classic home screen; the host's own screen (icons and a search bar) is treated like search, so tools are not locked out there. |
+
+Residual risk in windowed mode: the "exactly one app claims the foreground"
+check can only see apps the phone lets the runner list (those with an
+extension, or opened through iCTRL before). An app outside that list, shown in
+a window while nothing else claims the foreground, would be taken for the
+host's own screen.
+
+Tried and discarded: asking iOS which process owns the element at a screen
+point. For a windowed app it answers "SpringBoard".
+
+Diagnostics for this work are behind environment variables:
+`ICTRL_BRIDGE_DIAG=1` (front app, lock flag, SpringBoard ids, the foreground
+decision's inputs), `ICTRL_BRIDGE_DIAG_APPS=1` (per-app state and pid),
+`ICTRL_BRIDGE_DIAG_TREES=1` (candidate window frames in SpringBoard's tree).

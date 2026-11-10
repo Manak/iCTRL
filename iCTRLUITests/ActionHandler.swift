@@ -207,7 +207,8 @@ class ActionHandler {
         // usual system ones are worth a probe each before giving up.
         for b in Self.commonSystemApps where !candidates.contains(b) { candidates.append(b) }
         for b in candidates.prefix(30) where b != springboard {
-            if AppState(rawValue: ForegroundApp.appState(forBundleID: b)) == .foreground {
+            if AppState(rawValue: ForegroundApp.appState(forBundleID: b)) == .foreground,
+               ForegroundApp.processID(forBundleID: b) == pid {  // CLAUDE-BRIDGE HOOK: the front pid must be this app's (state alone lags)
                 frontByPID[pid] = b
                 return b
             }
@@ -222,7 +223,8 @@ class ActionHandler {
         var more: [String] = AppMemory.shared.openedApps().compactMap { $0["bundle_id"] as? String }
         more += Self.builtInApps.compactMap { $0["bundle_id"] }
         for b in more where b != springboard && tried.insert(b).inserted {
-            if AppState(rawValue: ForegroundApp.appState(forBundleID: b)) == .foreground {
+            if AppState(rawValue: ForegroundApp.appState(forBundleID: b)) == .foreground,
+               ForegroundApp.processID(forBundleID: b) == pid {  // CLAUDE-BRIDGE HOOK: the front pid must be this app's (state alone lags)
                 frontByPID[pid] = b
                 iCTRLUITests.logBuffer.append(String(format: "🔍 front app %@ found by asking known apps (%.0fms)",
                                                      b, (nowMonotonic - t0) * 1000))

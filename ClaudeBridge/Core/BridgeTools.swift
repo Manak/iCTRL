@@ -274,21 +274,21 @@ final class BridgeTools {
             params["filter"] = ["text": filter]
         }
         return guardian.guarded { probe in
-            switch self.raw.call("page_source", params) {
+            switch self.raw.call("page_source", Self.pageParams(params, probe)) {
             case .failure(let message):
                 return .error(self.quoted("read_ui failed", message))
             case .success(let page):
                 var text = page["source"] as? String ?? ""
                 // Frames must be tap points. An app drawing in its own
                 // smaller space has them converted here.
-                let map = Self.coordinateMap(BridgeUITree(source: text), probe)
+                let map = self.coordinateMap(BridgeUITree(source: text), probe)
                 text = map.rescale(text)
                 if let ocr = page["ocr_items"] as? [Any], !ocr.isEmpty {
                     text += "\n\n[text read by OCR, with tap points]\n" + Self.jsonString(ocr)
                 }
                 var notes = [Self.scrollSummary(page["scroll_position"])]
                 if !map.isIdentity {
-                    notes.append("This app draws at its own size and is scaled onto the screen; the frames below have been converted to screen points and can be tapped as they are.")
+                    notes.append("This app is shown scaled or in a window; the frames below have been converted to screen points and can be tapped as they are.")
                 }
                 if offscreen {
                     notes.append("Frames of things inside off-screen rows can be wrong. To act on one, use tap_element or scroll_to with its label instead of its coordinates.")
@@ -465,10 +465,40 @@ final class BridgeTools {
         return ElementTarget(text: text, match: match, occurrence: occurrence)
     }
 
-    static func coordinateMap(_ tree: BridgeUITree, _ probe: BridgeProbe) -> BridgeCoordinateMap {
-        guard let app = tree.appFrame else { return .identity }
+    /// How to turn this app's frames into screen points.
+    func coordinateMap(_ tree: BridgeUITree, _ probe: BridgeProbe) -> BridgeCoordinateMap {
+        guard let app = tree.appFrame, probe.pointWidth > 0 else { return .identity }
+        // An app that fills the screen needs nothing.
+        if abs(app.width - probe.pointWidth) < 1, abs(app.height - probe.pointHeight) < 1 { return .identity }
+        if let window = probe.appWindow ?? windowOnScreen(for: app) {
+            return BridgeCoordinateMap(appFrame: app, window: window)
+        }
         return BridgeCoordinateMap(appWidth: app.width, appHeight: app.height,
                                    screenWidth: probe.pointWidth, screenHeight: probe.pointHeight)
+    }
+
+    private var windowCache: (key: String, at: TimeInterval, rect: BridgeUITree.Rect?)?
+
+    /// Where a windowed app sits, read from SpringBoard's tree (cached briefly).
+    private func windowOnScreen(for app: BridgeUITree.Rect) -> BridgeUITree.Rect? {
+        let key = "\(Int(app.width))x\(Int(app.height))"
+        if let c = windowCache, c.key == key, clock.uptime - c.at < 4 { return c.rect }
+        var rect: BridgeUITree.Rect?
+        if case .success(let page) = raw.call("page_source", ["bundle_id": BridgeGuard.springboard, "visible_only": true, "max_children": 60]),
+           let source = page["source"] as? String {
+            rect = BridgeWindowLocator.locate(appFrame: app, springboard: BridgeUITree(source: source))
+        }
+        windowCache = (key, clock.uptime, rect)
+        return rect
+    }
+
+    /// `page_source` arguments naming the app to read. The app is named
+    /// explicitly because the raw API's own idea of the front app is wrong
+    /// when an app is shown in a window.
+    private static func pageParams(_ base: BridgeJSON, _ probe: BridgeProbe) -> BridgeJSON {
+        var params = base
+        if case .allowed(let app) = probe.foreground { params["bundle_id"] = app.bundleID }
+        return params
     }
 
     static let maxScrollSteps = 20
@@ -488,12 +518,12 @@ final class BridgeTools {
         let notFound = ElementError(message: "no element with that text was found, even after scrolling. Check the label with read_ui, or try match: contains.")
 
         for _ in 0..<Self.maxScrollSteps {
-            guard case .success(let page) = raw.call("page_source", ["visible_only": false, "max_children": 400]),
+            guard case .success(let page) = raw.call("page_source", Self.pageParams(["visible_only": false, "max_children": 400], probe)),
                   let source = page["source"] as? String else {
                 return .failure(ElementError(message: "the screen could not be read."))
             }
             let tree = BridgeUITree(source: source)
-            let map = Self.coordinateMap(tree, probe)
+            let map = self.coordinateMap(tree, probe)
             let hits = tree.find(target.text, match: target.match)
 
             guard hits.count >= target.occurrence else {
@@ -515,7 +545,7 @@ final class BridgeTools {
                     sleep(Self.settlePause)
                     continue
                 }
-                return .success(FoundElement(x: map.toScreen(frame.midX), y: map.toScreen(frame.midY), scrolls: scrolls))
+                return .success(FoundElement(x: map.screenX(frame.midX), y: map.screenY(frame.midY), scrolls: scrolls))
             }
             settledY = nil
             guard let area = tree.visibleArea(for: node), !area.isEmpty else {
@@ -532,10 +562,10 @@ final class BridgeTools {
             let step = min(abs(delta), area.height * 0.8)
             _ = raw.call("swipe", [
                 "direction": delta > 0 ? "up" : "down",
-                "distance": map.toScreen(step),
+                "distance": map.screenHeight(step),
                 "velocity": "slow",
-                "x": map.toScreen(area.midX),
-                "y": map.toScreen(area.midY),
+                "x": map.screenX(area.midX),
+                "y": map.screenY(area.midY),
             ])
             scrolls += 1
         }

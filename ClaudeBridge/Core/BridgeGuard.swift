@@ -19,6 +19,8 @@ struct BridgeProbe {
     let foreground: BridgeForeground
     let pointWidth: Double
     let pointHeight: Double
+    /// Where the front app sits on screen, when the runner measured it.
+    var appWindow: BridgeUITree.Rect? = nil
     /// device_info's `system` object (battery, thermal state, …). Contains no
     /// screen content, but does contain the foreground bundle id, so it is
     /// only passed on after filtering.
@@ -67,6 +69,10 @@ final class BridgeGuard {
     private let allowlist: BridgeAllowlistProvider
     /// Called on every transition into lockout.
     var onLockout: (() -> Void)?
+    /// When set, the runner's own inspection of the screen decides which app
+    /// is in front, instead of the raw API's `foreground_app`. Arguments are
+    /// the screen size in points.
+    var screenInspector: ((Double, Double) -> BridgeScreenInspection)?
     /// Post-action re-checks before a blocked reading counts as a lockout.
     var settleRetries = 2
     var settleDelay: TimeInterval = 0.5
@@ -99,10 +105,19 @@ final class BridgeGuard {
         let width = (info["point_width"] as? NSNumber)?.doubleValue ?? 0
         let height = (info["point_height"] as? NSNumber)?.doubleValue ?? 0
 
+        var window: BridgeUITree.Rect?
+        var reported = system["foreground_app"] as? String
+        let locked = (system["screen_locked"] as? Bool) ?? false
+        if !locked, let inspect = screenInspector {
+            let inspection = inspect(width, height)
+            reported = inspection.foregroundBundle
+            window = inspection.appWindow
+        }
+
         let foreground: BridgeForeground
-        if (system["screen_locked"] as? Bool) ?? false {
+        if locked {
             foreground = .phoneLocked
-        } else if let bundle = system["foreground_app"] as? String, !bundle.isEmpty {
+        } else if let bundle = reported, !bundle.isEmpty {
             if bundle == Self.springboard {
                 // SpringBoard also hosts the app switcher, which shows other
                 // apps' screens. Only the real home screen counts as home.
@@ -117,7 +132,7 @@ final class BridgeGuard {
             foreground = .blocked
         }
         if record { note(foreground) }
-        return BridgeProbe(foreground: foreground, pointWidth: width, pointHeight: height, system: system)
+        return BridgeProbe(foreground: foreground, pointWidth: width, pointHeight: height, appWindow: window, system: system)
     }
 
     /// Looks at SpringBoard's own UI tree to tell the home screen from the

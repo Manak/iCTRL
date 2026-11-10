@@ -556,11 +556,11 @@ final class GuardAndToolTests: XCTestCase {
         let h = Harness()
         h.raw.foreground = whatsApp
         _ = h.call("read_ui")
-        XCTAssertEqual(h.raw.calls.first { $0.method == "page_source" && $0.params["bundle_id"] == nil }!.params["visible_only"] as? Bool, true)
+        XCTAssertEqual(h.raw.calls.first { $0.method == "page_source" && $0.params["bundle_id"] as? String != BridgeGuard.springboard }!.params["visible_only"] as? Bool, true)
         let h2 = Harness()
         h2.raw.foreground = whatsApp
         let text = h2.call("read_ui", ["include_offscreen": true]).firstText
-        XCTAssertEqual(h2.raw.calls.first { $0.method == "page_source" && $0.params["bundle_id"] == nil }!.params["visible_only"] as? Bool, false)
+        XCTAssertEqual(h2.raw.calls.first { $0.method == "page_source" && $0.params["bundle_id"] as? String != BridgeGuard.springboard }!.params["visible_only"] as? Bool, false)
         XCTAssertTrue(text.contains("Off-screen elements are included"))
     }
 
@@ -736,5 +736,101 @@ final class GuardAndToolTests: XCTestCase {
         XCTAssertTrue(h.call("scroll", ["direction": "down", "points": 284]).firstText.contains("moved"))
         let page = h.raw.calls.first { $0.method == "page" }!.params
         XCTAssertEqual(page["distance"] as! Double, 0.5, accuracy: 0.001, "284 points is half of a 568-point page on an 852-point screen")
+    }
+
+    // MARK: Which app is in front
+
+    private func decide(front: Int32, apps: [String: Int32] = [:], searchActive: Bool = false) -> String? {
+        BridgeForegroundDecision.decide(frontPID: front, springboardPID: 37, searchPID: 223, searchActive: searchActive,
+                                        foregroundApps: apps, springboard: "sb", search: "search")
+    }
+
+    func testForegroundDecision() {
+        // Home screen.
+        XCTAssertEqual(decide(front: 37), "sb")
+        // A full-screen app is the frontmost process.
+        XCTAssertEqual(decide(front: 500, apps: ["whatsapp": 500]), "whatsapp")
+        // Search: the host is frontmost and says it is the foreground app.
+        XCTAssertEqual(decide(front: 223, searchActive: true), "search")
+        // An app in a window: the host is frontmost, one app claims the foreground.
+        XCTAssertEqual(decide(front: 223, apps: ["carousell": 7314]), "carousell")
+        // The host's own screen (the large-display home): nothing claims the foreground.
+        XCTAssertEqual(decide(front: 223), "search")
+    }
+
+    func testForegroundDecisionFailsClosed() {
+        // Frontmost process is nothing we know.
+        XCTAssertNil(decide(front: 900, apps: ["whatsapp": 500]))
+        // A stale claim does not make an app frontmost: this is the bug that
+        // named Taobao while Carousell was on screen.
+        XCTAssertNil(decide(front: 900, apps: ["taobao": 6821]))
+        // Windowed, with two apps claiming the foreground: one is stale.
+        XCTAssertNil(decide(front: 223, apps: ["taobao": 6821, "carousell": 7314]))
+        // No frontmost process at all.
+        XCTAssertNil(decide(front: 0, apps: ["whatsapp": 500]))
+    }
+
+    func testWindowedAppIsLocatedFromSpringBoardsTree() {
+        // SpringBoard at 466 x 678 with the stage laid out at 669 x 951, and
+        // a 375 x 667 app window at (147, 142) in stage units.
+        let springboard = BridgeUITree(source: [
+            "Application, {{0, 0}, {466, 678}}",
+            "  Window, {{0, 0}, {669, 951}}",
+            "  Window, {{0, 0}, {466, 678}}",
+            "  Window, {{0, 0}, {669, 951}}",
+            "    Other, {{147, 142}, {375, 667}}",
+            "  Window, {{0, 0}, {1398, 2034}}",
+        ].joined(separator: "\n"))
+        let window = BridgeWindowLocator.locate(appFrame: .init(x: 0, y: 0, width: 375, height: 667), springboard: springboard)!
+        XCTAssertEqual(window.x, 102.4, accuracy: 0.1)
+        XCTAssertEqual(window.y, 98.9, accuracy: 0.1)
+        XCTAssertEqual(window.width, 261.2, accuracy: 0.1)
+        XCTAssertEqual(window.height, 464.6, accuracy: 0.1)
+        // No stage, no answer (the caller falls back).
+        let plain = BridgeUITree(source: "Application, {{0, 0}, {466, 678}}\n  Window, {{0, 0}, {466, 678}}")
+        XCTAssertNil(BridgeWindowLocator.locate(appFrame: .init(x: 0, y: 0, width: 375, height: 667), springboard: plain))
+    }
+
+    func testReadUIOfAWindowedAppUsesItsRealPosition() {
+        let h = Harness(apps: [BridgeKnownLinks.app(bundleID: "com.example.shop", name: "Shop")])
+        h.guardian.screenInspector = { _, _ in BridgeScreenInspection(foregroundBundle: "com.example.shop", appWindow: nil) }
+        // What SpringBoard's tree looks like with the app in a window.
+        h.raw.springboardSource = "Application, {{0, 0}, {393, 852}}\n  Window, {{0, 0}, {786, 1704}}\n    Other, {{200, 500}, {375, 667}}"
+        h.raw.results["page_source"] = .success(["source": "Application, label: 'Shop', {{0, 0}, {375, 667}}\n  Button, label: 'Buy', {{0, 0}, {100, 50}}"])
+        let text = h.call("read_ui").firstText
+        // Stage scale 393/786 = 0.5: the button is at (100, 250), 50 x 25.
+        XCTAssertTrue(text.contains("Button, label: 'Buy', {{100, 250}, {50, 25}}"), text)
+    }
+
+    func testCoordinateMapFromAMeasuredWindow() {
+        // A 375 x 667 app shown in a 261 x 464 window at (103, 100).
+        let map = BridgeCoordinateMap(appFrame: .init(x: 0, y: 0, width: 375, height: 667),
+                                      window: .init(x: 103, y: 100, width: 261, height: 464))
+        XCTAssertEqual(map.screenX(0), 103, accuracy: 0.01)
+        XCTAssertEqual(map.screenX(375), 364, accuracy: 0.01)
+        XCTAssertEqual(map.screenY(667), 564, accuracy: 0.01)
+        XCTAssertEqual(map.rescale("Button, {{16, 32}, {40, 40}}"), "Button, {{114, 122}, {28, 28}}")
+        // A full-screen app needs no conversion.
+        XCTAssertTrue(BridgeCoordinateMap(appFrame: .init(x: 0, y: 0, width: 393, height: 852),
+                                          window: .init(x: 0, y: 0, width: 393, height: 852)).isIdentity)
+    }
+
+    func testInspectorDecidesForegroundAndNamesTheAppWhenReading() {
+        let h = Harness(apps: [.whatsApp, BridgeKnownLinks.app(bundleID: "com.example.shop", name: "Shop")])
+        // The raw API names the wrong app; the inspector knows better.
+        h.raw.foreground = whatsApp
+        h.guardian.screenInspector = { _, _ in
+            BridgeScreenInspection(foregroundBundle: "com.example.shop", appWindow: .init(x: 103, y: 100, width: 261, height: 464))
+        }
+        h.raw.results["page_source"] = .success(["source": "Application, label: 'Shop', {{0, 0}, {375, 667}}\n  Button, label: 'Buy', {{16, 32}, {40, 40}}"])
+        let text = h.call("read_ui").firstText
+        let read = h.raw.calls.first { $0.method == "page_source" && $0.params["bundle_id"] as? String != BridgeGuard.springboard }!
+        XCTAssertEqual(read.params["bundle_id"] as? String, "com.example.shop", "the app is named explicitly")
+        XCTAssertTrue(text.contains("Button, label: 'Buy', {{114, 122}, {28, 28}}"), text)
+        XCTAssertTrue(h.call("phone_status").firstText.contains("Shop"))
+
+        // And when the inspector cannot vouch for the screen, it is a lockout.
+        h.guardian.screenInspector = { _, _ in BridgeScreenInspection(foregroundBundle: nil, appWindow: nil) }
+        XCTAssertEqual(h.call("read_ui").status, .lockedOut)
     }
 }
