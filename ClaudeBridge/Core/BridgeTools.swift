@@ -99,10 +99,19 @@ final class BridgeTools {
             ], required: ["direction"], readOnly: false),
         Definition(
             name: "scroll_to", title: "Scroll to element",
-            description: "Scroll until an element with this label or identifier is in view, then return its tap point. Works for elements that are off screen, including ones not loaded yet. Use the label as it appears in read_ui.",
+            description: "Bring an element into view by its label or identifier, and return its tap point. Works for elements that are off screen. Use the label as it appears in read_ui.",
             properties: [
                 "text": ["type": "string", "description": "The element's label or identifier."] as BridgeJSON,
-                "match": ["type": "string", "enum": ["exact", "contains"], "description": "Default exact."] as BridgeJSON,
+                "match": ["type": "string", "enum": ["exact", "contains"], "description": "Default exact (case-insensitive)."] as BridgeJSON,
+                "occurrence": ["type": "number", "description": "Which match to use when several elements share the text: 1 (default) is the first."] as BridgeJSON,
+            ], required: ["text"], readOnly: false),
+        Definition(
+            name: "tap_element", title: "Tap element",
+            description: "Tap an element by its label or identifier, wherever it is: if it is off screen it is scrolled into view first. Prefer this to tap with coordinates whenever the element has a label. Use the label as it appears in read_ui.",
+            properties: [
+                "text": ["type": "string", "description": "The element's label or identifier."] as BridgeJSON,
+                "match": ["type": "string", "enum": ["exact", "contains"], "description": "Default exact (case-insensitive)."] as BridgeJSON,
+                "occurrence": ["type": "number", "description": "Which match to use when several elements share the text: 1 (default) is the first."] as BridgeJSON,
             ], required: ["text"], readOnly: false),
         Definition(
             name: "tap", title: "Tap",
@@ -174,6 +183,7 @@ final class BridgeTools {
         case "swipe": return swipe(args)
         case "scroll": return scroll(args)
         case "scroll_to": return scrollTo(args)
+        case "tap_element": return tapElement(args)
         case "type_text": return typeText(args)
         case "launch_app": return launchApp(args)
         case "open_url": return openURL(args)
@@ -254,9 +264,12 @@ final class BridgeTools {
     private func readUI(_ args: BridgeJSON) -> BridgeToolResult {
         let offscreen = args["include_offscreen"] as? Bool ?? false
         // On-screen only by default: long lists keep hundreds of rows loaded.
+        // The child limit applies before the on-screen filter, so it has to
+        // be generous: at 50, rows past the 50th never showed up, even when
+        // they were the ones on screen.
         var params: BridgeJSON = offscreen
             ? ["visible_only": false, "max_children": 400]
-            : ["visible_only": true, "max_children": 50]
+            : ["visible_only": true, "max_children": 400]
         if let filter = args["filter_text"] as? String, !filter.isEmpty {
             params["filter"] = ["text": filter]
         }
@@ -266,10 +279,20 @@ final class BridgeTools {
                 return .error(self.quoted("read_ui failed", message))
             case .success(let page):
                 var text = page["source"] as? String ?? ""
+                // Frames must be tap points. An app drawing in its own
+                // smaller space has them converted here.
+                let map = Self.coordinateMap(BridgeUITree(source: text), probe)
+                text = map.rescale(text)
                 if let ocr = page["ocr_items"] as? [Any], !ocr.isEmpty {
                     text += "\n\n[text read by OCR, with tap points]\n" + Self.jsonString(ocr)
                 }
                 var notes = [Self.scrollSummary(page["scroll_position"])]
+                if !map.isIdentity {
+                    notes.append("This app draws at its own size and is scaled onto the screen; the frames below have been converted to screen points and can be tapped as they are.")
+                }
+                if offscreen {
+                    notes.append("Frames of things inside off-screen rows can be wrong. To act on one, use tap_element or scroll_to with its label instead of its coordinates.")
+                }
                 if offscreen, probe.pointHeight > 0 {
                     notes.append("Off-screen elements are included: the screen is \(Int(probe.pointWidth)) x \(Int(probe.pointHeight)) points, and a frame outside it must be scrolled into view before it can be tapped.")
                 }
@@ -359,8 +382,11 @@ final class BridgeTools {
         return guardian.guarded { probe in
             // A plain vertical page uses the device's own paging, which is
             // exact and reports where it ended up.
-            if vertical, points == nil, x == nil, y == nil {
-                return self.scrollOutcome(self.raw.call("page", ["direction": direction, "distance": pages]))
+            if vertical, x == nil, y == nil {
+                // The device's page is two thirds of the screen height.
+                var amount = pages
+                if let points = points, probe.pointHeight > 0 { amount = points / (probe.pointHeight * 2 / 3) }
+                return self.scrollOutcome(self.raw.call("page", ["direction": direction, "distance": amount]))
             }
             // Everything else is a slow drag of an exact length: no momentum.
             guard probe.pointWidth > 0, probe.pointHeight > 0 else {
@@ -381,29 +407,139 @@ final class BridgeTools {
     }
 
     private func scrollTo(_ args: BridgeJSON) -> BridgeToolResult {
-        guard let text = args["text"] as? String, !text.isEmpty, text.count <= 200 else {
-            return Self.refused("text is required (up to 200 characters)")
-        }
-        var params: BridgeJSON = ["element_id": text]
-        if let match = args["match"] as? String {
-            guard match == "exact" || match == "contains" else { return Self.refused("match must be exact or contains") }
-            params["match"] = match
-        }
-        return guardian.guarded { _ in
-            switch self.raw.call("scroll_to_element", params) {
-            case .failure(let message):
-                return .error(self.quoted("scroll_to failed", message))
-            case .success(let body):
-                guard (body["found"] as? Bool) == true,
-                      let x = Self.number(body["x"]) ?? Self.number(body["center_x"]),
-                      let y = Self.number(body["y"]) ?? Self.number(body["center_y"]) else {
-                    return .error("scroll_to: no such element was found after scrolling. Check the exact label with read_ui, or try match: contains.")
-                }
-                var line = "scroll_to: the element is in view. Tap it at x=\(Int(x)), y=\(Int(y))."
-                if let swipes = Self.number(body["swipes"]) { line += " Scrolled \(Int(swipes)) time(s)." }
-                return .text(line)
+        guard let target = Self.elementTarget(args) else { return Self.refused("text is required (up to 200 characters); match is exact or contains; occurrence is 1 or more") }
+        return guardian.guarded { probe in
+            switch self.bringIntoView(target, probe: probe) {
+            case .failure(let why):
+                return .error("scroll_to: \(why.message)")
+            case .success(let found):
+                return .text("scroll_to: the element is in view. Tap it at x=\(Int(found.x.rounded())), y=\(Int(found.y.rounded())), or use tap_element. Scrolled \(found.scrolls) time(s).")
             }
         }
+    }
+
+    private func tapElement(_ args: BridgeJSON) -> BridgeToolResult {
+        guard let target = Self.elementTarget(args) else { return Self.refused("text is required (up to 200 characters); match is exact or contains; occurrence is 1 or more") }
+        return guardian.guarded { probe in
+            switch self.bringIntoView(target, probe: probe) {
+            case .failure(let why):
+                return .error("tap_element: \(why.message)")
+            case .success(let found):
+                if case .failure(let message) = self.raw.call("tap", ["x": found.x, "y": found.y]) {
+                    return .error(self.quoted("tap_element: found it, but the tap failed", message))
+                }
+                return .text("tap_element: tapped at x=\(Int(found.x.rounded())), y=\(Int(found.y.rounded())) after \(found.scrolls) scroll(s). Read the screen to confirm the result.")
+            }
+        }
+    }
+
+    // MARK: Finding elements
+
+    struct ElementTarget {
+        let text: String
+        let match: BridgeUITree.Match
+        let occurrence: Int
+    }
+
+    struct FoundElement {
+        /// Tap point in screen points.
+        let x: Double
+        let y: Double
+        let scrolls: Int
+    }
+
+    struct ElementError: Error { let message: String }
+
+    private static func elementTarget(_ args: BridgeJSON) -> ElementTarget? {
+        guard let text = args["text"] as? String, !text.isEmpty, text.count <= 200 else { return nil }
+        var match = BridgeUITree.Match.exact
+        if let m = args["match"] as? String {
+            guard m == "exact" || m == "contains" else { return nil }
+            if m == "contains" { match = .contains }
+        }
+        var occurrence = 1
+        if let o = args["occurrence"] {
+            guard let n = number(o), n >= 1, n <= 100, n == n.rounded() else { return nil }
+            occurrence = Int(n)
+        }
+        return ElementTarget(text: text, match: match, occurrence: occurrence)
+    }
+
+    static func coordinateMap(_ tree: BridgeUITree, _ probe: BridgeProbe) -> BridgeCoordinateMap {
+        guard let app = tree.appFrame else { return .identity }
+        return BridgeCoordinateMap(appWidth: app.width, appHeight: app.height,
+                                   screenWidth: probe.pointWidth, screenHeight: probe.pointHeight)
+    }
+
+    static let maxScrollSteps = 20
+    static let maxSearchPages = 8
+    static let settlePause: TimeInterval = 0.3
+    /// Replaceable so tests do not wait.
+    var sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
+
+    /// Finds the element in the full UI tree and scrolls until its centre is
+    /// showing. It does this itself, from row frames, because the device's
+    /// own scroll-to-element trusts frames that off-screen rows get wrong.
+    func bringIntoView(_ target: ElementTarget, probe: BridgeProbe) -> Result<FoundElement, ElementError> {
+        var scrolls = 0
+        var searched = 0
+        var lastY: Double?
+        var settledY: Double?
+        let notFound = ElementError(message: "no element with that text was found, even after scrolling. Check the label with read_ui, or try match: contains.")
+
+        for _ in 0..<Self.maxScrollSteps {
+            guard case .success(let page) = raw.call("page_source", ["visible_only": false, "max_children": 400]),
+                  let source = page["source"] as? String else {
+                return .failure(ElementError(message: "the screen could not be read."))
+            }
+            let tree = BridgeUITree(source: source)
+            let map = Self.coordinateMap(tree, probe)
+            let hits = tree.find(target.text, match: target.match)
+
+            guard hits.count >= target.occurrence else {
+                // Not loaded yet (a list that builds rows as it goes): page down and look again.
+                guard searched < Self.maxSearchPages,
+                      case .success(let moved) = raw.call("page", ["direction": "down"]),
+                      (moved["moved"] as? Bool) != false else { return .failure(notFound) }
+                searched += 1
+                scrolls += 1
+                continue
+            }
+            let node = hits[target.occurrence - 1]
+            let frame = tree.effectiveFrame(of: node)
+            if tree.isInView(node) {
+                // After a scroll the list can still be gliding, and a tap on
+                // a moving list only stops it. Wait until two readings agree.
+                if scrolls > 0, settledY.map({ abs($0 - frame.midY) >= 1 }) ?? true {
+                    settledY = frame.midY
+                    sleep(Self.settlePause)
+                    continue
+                }
+                return .success(FoundElement(x: map.toScreen(frame.midX), y: map.toScreen(frame.midY), scrolls: scrolls))
+            }
+            settledY = nil
+            guard let area = tree.visibleArea(for: node), !area.isEmpty else {
+                return .failure(ElementError(message: "the element is not inside anything that can be scrolled into view."))
+            }
+            if let last = lastY, abs(last - frame.midY) < 1 {
+                return .failure(ElementError(message: "the element is there but the view would not scroll to it."))
+            }
+            lastY = frame.midY
+
+            // Drag the list by exactly the distance to the element, in steps
+            // of at most most of the visible area. Slow, so no momentum.
+            let delta = frame.midY - area.midY
+            let step = min(abs(delta), area.height * 0.8)
+            _ = raw.call("swipe", [
+                "direction": delta > 0 ? "up" : "down",
+                "distance": map.toScreen(step),
+                "velocity": "slow",
+                "x": map.toScreen(area.midX),
+                "y": map.toScreen(area.midY),
+            ])
+            scrolls += 1
+        }
+        return .failure(ElementError(message: "it took too many scrolls to reach the element; try scroll to get closer first."))
     }
 
     /// Reports a scroll from the device's numbers: did it move, and where to.

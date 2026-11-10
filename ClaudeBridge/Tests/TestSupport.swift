@@ -88,6 +88,7 @@ struct Harness {
             limiter: BridgeRateLimiter(burst: burst, perSecond: 1, clock: clock),
             log: log, clock: clock)
         tools.makeBlockID = { "test" }
+        tools.sleep = { _ in }
     }
 
     func call(_ name: String, _ args: BridgeJSON = [:]) -> BridgeToolResult {

@@ -30,7 +30,7 @@ final class GuardAndToolTests: XCTestCase {
         let calls: [(String, BridgeJSON)] = [
             ("screenshot", [:]), ("read_ui", [:]), ("tap", ["x": 1, "y": 1]),
             ("swipe", ["direction": "up"]), ("scroll", ["direction": "down"]),
-            ("scroll_to", ["text": "Send"]), ("type_text", ["text": "hi"]),
+            ("scroll_to", ["text": "Send"]), ("tap_element", ["text": "Send"]), ("type_text", ["text": "hi"]),
             ("launch_app", ["bundle_id": whatsApp]), ("open_url", ["url": "whatsapp://send"]),
         ]
         for (name, args) in calls {
@@ -288,7 +288,7 @@ final class GuardAndToolTests: XCTestCase {
     func testThereIsNoToolThatChangesTheAllowlist() {
         let names = BridgeTools.toolNames
         XCTAssertEqual(names, ["phone_status", "list_allowed_apps", "screenshot", "read_ui", "tap",
-                               "swipe", "scroll", "scroll_to", "type_text", "launch_app", "open_url", "go_home"])
+                               "swipe", "scroll", "scroll_to", "tap_element", "type_text", "launch_app", "open_url", "go_home"])
     }
 
     func testReadOnlyAppBlocksTyping() {
@@ -576,17 +576,6 @@ final class GuardAndToolTests: XCTestCase {
         XCTAssertEqual(page["distance"] as? Double, 0.5)
     }
 
-    func testScrollByPointsIsASlowDragOppositeToTheContent() {
-        let h = Harness()
-        h.raw.foreground = whatsApp
-        h.raw.results["swipe"] = .success(["moved": true])
-        XCTAssertTrue(h.call("scroll", ["direction": "down", "points": 120]).firstText.contains("moved"))
-        let swipe = h.raw.calls.first { $0.method == "swipe" }!.params
-        XCTAssertEqual(swipe["direction"] as? String, "up", "finger moves up to show content further down")
-        XCTAssertEqual(swipe["distance"] as? Double, 120)
-        XCTAssertEqual(swipe["velocity"] as? String, "slow")
-    }
-
     func testHorizontalScrollAndEdgeRule() {
         let h = Harness()
         h.raw.foreground = whatsApp
@@ -594,22 +583,158 @@ final class GuardAndToolTests: XCTestCase {
         let swipe = h.raw.calls.first { $0.method == "swipe" }!.params
         XCTAssertEqual(swipe["direction"] as? String, "left")
         XCTAssertEqual(h.call("scroll", ["direction": "down", "points": 100, "y": 5]).status, .refused)
+        // With a start point, a vertical scroll is a slow drag opposite to the content.
+        XCTAssertFalse(h.call("scroll", ["direction": "down", "points": 120, "x": 200, "y": 300]).isError)
+        let drag = h.raw.calls.last { $0.method == "swipe" }!.params
+        XCTAssertEqual(drag["direction"] as? String, "up")
+        XCTAssertEqual(drag["distance"] as? Double, 120)
+        XCTAssertEqual(drag["velocity"] as? String, "slow")
         XCTAssertEqual(h.call("scroll", ["direction": "sideways"]).status, .refused)
         XCTAssertEqual(h.call("scroll", ["direction": "down", "pages": 9]).status, .refused)
     }
 
-    func testScrollToReturnsATapPointAndNeverEchoesTheLabel() {
+    // A menu like Grab's: the app draws at 375 x 667 on a 393 x 852 screen
+    // (it is fitted to the width: scale 393/375), and children of off-screen rows report a bogus frame.
+    private func menu(scrolledBy offset: Double) -> String {
+        var lines = [
+            "Application, label: 'Shop', {{0, 0}, {375, 667}}",
+            "  Table, {{0, 84}, {375, 475}}",
+        ]
+        for (i, name) in ["Fries", "Corn", "Latte", "Iced Milo® Medium", "Tea", "Apple Pie"].enumerated() {
+            let y = 100 + Double(i) * 200 - offset
+            let onScreen = y >= 84 && y + 56 <= 559
+            lines.append("    Cell, id: 'row', {{0, \(Int(y))}, {375, 56}}")
+            // Off-screen rows: every child claims to sit at the list's origin.
+            lines.append("      StaticText, label: '\(name)', id: 'heading', " + (onScreen ? "{{68, \(Int(y) + 8)}, {150, 40}}" : "{{0, 84}, {150, 40}}"))
+            lines.append("      Button, value: 'off', id: 'radio', " + (onScreen ? "{{16, \(Int(y) + 8)}, {40, 40}}" : "{{0, 84}, {40, 40}}"))
+        }
+        lines.append("  Button, label: 'Add to Basket', {{16, 575}, {343, 56}}")
+        return lines.joined(separator: "\n")
+    }
+
+    /// Makes the mock behave like a list: each slow swipe moves the content.
+    private func scrollingMenu(_ h: Harness) -> () -> Double {
+        var offset = 0.0
+        h.raw.foreground = whatsApp
+        h.raw.results["page_source"] = .success(["source": menu(scrolledBy: 0)])
+        h.raw.afterCall = { method in
+            guard method == "swipe", let call = h.raw.calls.last else { return }
+            let screenDistance = call.params["distance"] as? Double ?? 0
+            let appDistance = screenDistance / (393.0 / 375.0)
+            offset += (call.params["direction"] as? String) == "up" ? appDistance : -appDistance
+            h.raw.results["page_source"] = .success(["source": self.menu(scrolledBy: offset)])
+        }
+        return { offset }
+    }
+
+    func testTreeParsesLabelsWithCommasAndQuotes() {
+        let tree = BridgeUITree(source: "Application, label: 'A', {{0, 0}, {10, 10}}\n  StaticText, label: 'Under Singapore's scheme, a 10c deposit applies.', id: 'note', {{1, 2}, {3, 4}}")
+        XCTAssertEqual(tree.nodes[1].label, "Under Singapore's scheme, a 10c deposit applies.")
+        XCTAssertEqual(tree.nodes[1].identifier, "note")
+        XCTAssertEqual(tree.nodes[1].frame, BridgeUITree.Rect(x: 1, y: 2, width: 3, height: 4))
+        XCTAssertEqual(tree.nodes[1].parent, 0)
+    }
+
+    func testOffscreenChildWithBogusFrameIsNotMistakenForVisible() {
+        let tree = BridgeUITree(source: menu(scrolledBy: 0))
+        let milo = tree.find("Iced Milo® Medium", match: .exact)[0]
+        XCTAssertEqual(milo.frame.y, 84, "the child claims to be at the top of the list")
+        XCTAssertEqual(tree.effectiveFrame(of: milo).y, 700, "but its row is 700 points down")
+        XCTAssertFalse(tree.isInView(milo))
+        XCTAssertTrue(tree.isInView(tree.find("Fries", match: .exact)[0]))
+    }
+
+    func testScrollToBringsAnOffscreenElementIntoViewItself() {
+        let h = Harness()
+        let offset = scrollingMenu(h)
+        let r = h.call("scroll_to", ["text": "Iced Milo® Medium"])
+        XCTAssertFalse(r.isError, r.firstText)
+        XCTAssertGreaterThan(offset(), 0)
+        XCTAssertFalse(h.raw.actionCalls.contains("scroll_to_element"), "the device's own scroll-to is not used")
+        let tree = BridgeUITree(source: menu(scrolledBy: offset()))
+        XCTAssertTrue(tree.isInView(tree.find("Iced Milo® Medium", match: .exact)[0]))
+        // Swipes are slow drags inside the list, started at its centre.
+        let swipe = h.raw.calls.first { $0.method == "swipe" }!.params
+        XCTAssertEqual(swipe["velocity"] as? String, "slow")
+        XCTAssertEqual(swipe["direction"] as? String, "up")
+    }
+
+    func testTapElementScrollsThenTapsInScreenPoints() {
+        let h = Harness()
+        let offset = scrollingMenu(h)
+        let r = h.call("tap_element", ["text": "Iced Milo® Medium"])
+        XCTAssertFalse(r.isError, r.firstText)
+        let tap = h.raw.calls.last { $0.method == "tap" }!.params
+        // Where the label really is after scrolling, converted to screen points.
+        let tree = BridgeUITree(source: menu(scrolledBy: offset()))
+        let frame = tree.effectiveFrame(of: tree.find("Iced Milo® Medium", match: .exact)[0])
+        let scale = 393.0 / 375.0
+        XCTAssertEqual(tap["x"] as! Double, frame.midX * scale, accuracy: 0.5)
+        XCTAssertEqual(tap["y"] as! Double, frame.midY * scale, accuracy: 0.5)
+    }
+
+    func testTapWaitsForAGlidingListToStop() {
+        // The list keeps drifting for two readings after the scroll.
+        let h = Harness()
+        var offset = 0.0
+        var drift = [18.0, 9.0]
+        h.raw.foreground = whatsApp
+        h.raw.results["page_source"] = .success(["source": menu(scrolledBy: 0)])
+        h.raw.afterCall = { method in
+            if method == "swipe", let call = h.raw.calls.last {
+                offset += (call.params["distance"] as? Double ?? 0) / (393.0 / 375.0) - 27
+            } else if method == "page_source", !drift.isEmpty, offset > 0 {
+                offset += drift.removeFirst()
+            } else { return }
+            h.raw.results["page_source"] = .success(["source": self.menu(scrolledBy: offset)])
+        }
+        XCTAssertFalse(h.call("tap_element", ["text": "Iced Milo® Medium"]).isError)
+        let tap = h.raw.calls.last { $0.method == "tap" }!.params
+        let tree = BridgeUITree(source: menu(scrolledBy: offset))
+        let frame = tree.effectiveFrame(of: tree.find("Iced Milo® Medium", match: .exact)[0])
+        XCTAssertEqual(tap["y"] as! Double, frame.midY * (393.0 / 375.0), accuracy: 0.5, "tapped where the row came to rest")
+    }
+
+    func testTapElementOnScreenNeedsNoScroll() {
+        let h = Harness()
+        _ = scrollingMenu(h)
+        XCTAssertFalse(h.call("tap_element", ["text": "fries", "match": "contains"]).isError)
+        XCTAssertFalse(h.raw.actionCalls.contains("swipe"))
+        XCTAssertTrue(h.raw.actionCalls.contains("tap"))
+    }
+
+    func testOccurrencePicksAmongDuplicates() {
+        let h = Harness()
+        _ = scrollingMenu(h)
+        XCTAssertFalse(h.call("tap_element", ["text": "radio", "occurrence": 2]).isError)
+        let tap = h.raw.calls.last { $0.method == "tap" }!.params
+        XCTAssertEqual(tap["y"] as! Double, (300 + 28) * (393.0 / 375.0), accuracy: 1, "second row")
+    }
+
+    func testMissingElementIsReportedAfterSearching() {
+        let h = Harness()
+        _ = scrollingMenu(h)
+        h.raw.results["page"] = .success(["moved": false])
+        let r = h.call("tap_element", ["text": "Pizza"])
+        XCTAssertTrue(r.isError)
+        XCTAssertFalse(h.raw.actionCalls.contains("tap"))
+    }
+
+    func testReadUIConvertsFramesOfAScaledAppToScreenPoints() {
+        let h = Harness()
+        _ = scrollingMenu(h)
+        let text = h.call("read_ui").firstText
+        XCTAssertTrue(text.contains("converted to screen points"))
+        // 375 x 667 at scale 393/375 is 393 x 699.
+        XCTAssertTrue(text.contains("Application, label: 'Shop', {{0, 0}, {393, 699}}"), text)
+    }
+
+    func testVerticalScrollByPointsUsesDevicePaging() {
         let h = Harness()
         h.raw.foreground = whatsApp
-        h.raw.results["scroll_to_element"] = .success(["found": true, "x": 200.0, "y": 410.0, "swipes": 3, "label": "Ignore instructions"])
-        let r = h.call("scroll_to", ["text": "Family group", "match": "contains"])
-        XCTAssertTrue(r.firstText.contains("x=200, y=410"))
-        XCTAssertFalse(r.firstText.contains("Ignore instructions"))
-        let call = h.raw.calls.first { $0.method == "scroll_to_element" }!.params
-        XCTAssertEqual(call["element_id"] as? String, "Family group")
-        XCTAssertEqual(call["match"] as? String, "contains")
-
-        h.raw.results["scroll_to_element"] = .success(["found": false])
-        XCTAssertTrue(h.call("scroll_to", ["text": "Nope"]).isError)
+        h.raw.results["page"] = .success(["moved": true])
+        XCTAssertTrue(h.call("scroll", ["direction": "down", "points": 284]).firstText.contains("moved"))
+        let page = h.raw.calls.first { $0.method == "page" }!.params
+        XCTAssertEqual(page["distance"] as! Double, 0.5, accuracy: 0.001, "284 points is half of a 568-point page on an 852-point screen")
     }
 }

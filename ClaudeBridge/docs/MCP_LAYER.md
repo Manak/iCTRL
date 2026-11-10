@@ -31,7 +31,8 @@ arguments.
 | `screenshot` | refused | JPEG. At scale 1, pixels equal tap points. |
 | `read_ui` | refused | UI tree with frames. Starts with the scroll position (how far down, how much content above and below). Optional `filter_text`; `include_offscreen` also lists elements loaded beyond the screen edges. |
 | `scroll` | refused | Precise scrolling without momentum: `direction` plus `pages` (a fraction of a screen) or `points`; optional `x`,`y` to scroll one area. Reports whether it moved and the new position. |
-| `scroll_to` | refused | Scrolls until an element with a given label is in view and returns its tap point. |
+| `scroll_to` | refused | Brings an element into view by label or identifier and returns its tap point. |
+| `tap_element` | refused | Taps an element by label or identifier wherever it is: scrolls it into view first if it is off screen, waits for the list to stop, then taps. `occurrence` picks among duplicates. |
 | `tap` | refused | x, y in points. |
 | `swipe` | refused | Low-level gesture (pull to refresh, swipe a row). Refuses starts within 40 pt of the top edge or 50 pt of the bottom edge (system gestures). |
 | `type_text` | refused | Refused in apps marked read-only. |
@@ -190,3 +191,29 @@ will be missing; it can be added by bundle id at the bottom of the screen.
 - Read-only blocks typing. Taps on send buttons are not detected.
 
 Not yet tried on a phone.
+
+## Elements, scrolling and coordinates: what real apps needed
+
+Found while driving a food-ordering menu in Grab on iOS 27.2, and fixed in
+`BridgeUITree` and `BridgeTools`:
+
+- **Apps that draw at their own size.** Grab draws at 375 x 667 and iOS scales
+  it onto the 466 x 678 screen, at the top-left. Its frames are then not tap
+  points. `read_ui` converts every frame to screen points and says so.
+- **Bogus frames in off-screen rows.** Children of a row that is off screen all
+  reported the list's origin as their frame, so iCTRL's own
+  `scroll_to_element` decided an item four screens down was already in view.
+  The bridge does not use it. It parses the tree, takes the row's own frame
+  when a child's frame falls outside its row, and scrolls with exact slow
+  drags inside the scrolling view until the element's centre is showing.
+- **Taps on a gliding list are swallowed.** After a scroll the bridge re-reads
+  until two readings of the element's position agree, then taps.
+- **The child limit hid rows.** `page_source` applies `max_children` before
+  its on-screen filter, so at 50 the rows past the 50th never appeared, even
+  when they were the ones on screen. `read_ui` now asks for 400.
+
+Verified on the phone: `tap_element` selected items one and four screens down
+the list, and the basket total changed to match.
+
+Not handled: horizontal scrolling to an element, and lists that only build
+rows as you scroll are searched by paging down only (not up).
