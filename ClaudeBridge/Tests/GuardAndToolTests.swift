@@ -618,10 +618,16 @@ final class GuardAndToolTests: XCTestCase {
         h.raw.foreground = whatsApp
         h.raw.results["page_source"] = .success(["source": menu(scrolledBy: 0)])
         h.raw.afterCall = { method in
-            guard method == "swipe", let call = h.raw.calls.last else { return }
-            let screenDistance = call.params["distance"] as? Double ?? 0
-            let appDistance = screenDistance / (393.0 / 375.0)
-            offset += (call.params["direction"] as? String) == "up" ? appDistance : -appDistance
+            guard let call = h.raw.calls.last else { return }
+            let scale = 393.0 / 375.0
+            if method == "swipe" {
+                let appDistance = (call.params["distance"] as? Double ?? 0) / scale
+                offset += (call.params["direction"] as? String) == "up" ? appDistance : -appDistance
+            } else if method == "page" {
+                // The device's page: screenfuls of two thirds of the screen height.
+                let appDistance = (call.params["distance"] as? Double ?? 1) * (852.0 * 2 / 3) / scale
+                offset += (call.params["direction"] as? String) == "down" ? appDistance : -appDistance
+            } else { return }
             h.raw.results["page_source"] = .success(["source": self.menu(scrolledBy: offset)])
         }
         return { offset }
@@ -653,10 +659,78 @@ final class GuardAndToolTests: XCTestCase {
         XCTAssertFalse(h.raw.actionCalls.contains("scroll_to_element"), "the device's own scroll-to is not used")
         let tree = BridgeUITree(source: menu(scrolledBy: offset()))
         XCTAssertTrue(tree.isInView(tree.find("Iced Milo® Medium", match: .exact)[0]))
-        // Swipes are slow drags inside the list, started at its centre.
+    }
+
+    func testFarElementIsReachedInOneJumpNotScreenByScreen() {
+        let h = Harness()
+        _ = scrollingMenu(h)
+        // "Apple Pie" is the last row, about 1000 app points down.
+        XCTAssertFalse(h.call("scroll_to", ["text": "Apple Pie"]).isError)
+        let moves = h.raw.actionCalls.filter { $0 == "page" || $0 == "swipe" }
+        XCTAssertEqual(moves.first, "page", "the long stretch is one paging call")
+        XCTAssertLessThanOrEqual(moves.count, 2, "one jump, at most one fine adjustment: \(moves)")
+        let page = h.raw.calls.first { $0.method == "page" }!.params
+        XCTAssertEqual(page["direction"] as? String, "down")
+        XCTAssertGreaterThan(page["distance"] as! Double, 1, "more than one screen in a single call")
+    }
+
+    func testAppIsAskedToJumpToTheElementBeforeAnyDragging() {
+        let h = Harness()
+        _ = scrollingMenu(h)
+        var asked: [(String, String, Bool, Int)] = []
+        h.tools.jumpToElement = { bundle, text, contains, occurrence in
+            asked.append((bundle, text, contains, occurrence))
+            // The app scrolls itself so that Apple Pie (row 6, 1100 points down) is in view.
+            h.raw.results["page_source"] = .success(["source": self.menu(scrolledBy: 800)])
+            return true
+        }
+        let r = h.call("tap_element", ["text": "Apple Pie"])
+        XCTAssertFalse(r.isError, r.firstText)
+        XCTAssertEqual(asked.count, 1)
+        XCTAssertEqual(asked[0].0, whatsApp)
+        XCTAssertEqual(asked[0].1, "Apple Pie")
+        XCTAssertFalse(h.raw.actionCalls.contains("page"), "no gesture scrolling was needed")
+        XCTAssertFalse(h.raw.actionCalls.contains("swipe"))
+        XCTAssertTrue(h.raw.actionCalls.contains("tap"))
+    }
+
+    func testFallsBackToGesturesWhenTheAppWillNotJump() {
+        let h = Harness()
+        _ = scrollingMenu(h)
+        h.tools.jumpToElement = { _, _, _, _ in false }
+        XCTAssertFalse(h.call("scroll_to", ["text": "Apple Pie"]).isError)
+        XCTAssertTrue(h.raw.actionCalls.contains("page"))
+    }
+
+    func testScrollReportsMovementFromPositionNotTheDeviceFlag() {
+        let h = Harness()
+        h.raw.foreground = whatsApp
+        h.raw.results["page_source"] = .success(["source": "Table", "scroll_position": ["scrolled_pt": 1000.0, "scrollable_pt": 9000.0, "viewport_pt": 600.0]])
+        _ = h.call("read_ui")
+        // The device says "did not move" although the position changed.
+        h.raw.results["page"] = .success(["moved": false, "at_end": true, "position": ["scrolled_pt": 2600.0, "scrollable_pt": 9000.0, "viewport_pt": 600.0]])
+        XCTAssertTrue(h.call("scroll", ["direction": "down", "points": 2000]).firstText.hasPrefix("scroll: moved."))
+        // Same position again: now it really did not move.
+        XCTAssertTrue(h.call("scroll", ["direction": "down", "points": 2000]).firstText.contains("did not move"))
+    }
+
+    func testNearbyElementUsesOneExactSlowDrag() {
+        // The list starts 300 points down, so "Tea" (row 5) sits just below the view.
+        let h = Harness()
+        var offset = 300.0
+        h.raw.foreground = whatsApp
+        h.raw.results["page_source"] = .success(["source": menu(scrolledBy: offset)])
+        h.raw.afterCall = { method in
+            guard method == "swipe", let call = h.raw.calls.last else { return }
+            let distance = (call.params["distance"] as? Double ?? 0) / (393.0 / 375.0)
+            offset += (call.params["direction"] as? String) == "up" ? distance : -distance
+            h.raw.results["page_source"] = .success(["source": self.menu(scrolledBy: offset)])
+        }
+        XCTAssertFalse(h.call("scroll_to", ["text": "Tea"]).isError)
         let swipe = h.raw.calls.first { $0.method == "swipe" }!.params
         XCTAssertEqual(swipe["velocity"] as? String, "slow")
         XCTAssertEqual(swipe["direction"] as? String, "up")
+        XCTAssertFalse(h.raw.actionCalls.contains("page"))
     }
 
     func testTapElementScrollsThenTapsInScreenPoints() {
@@ -683,6 +757,8 @@ final class GuardAndToolTests: XCTestCase {
         h.raw.afterCall = { method in
             if method == "swipe", let call = h.raw.calls.last {
                 offset += (call.params["distance"] as? Double ?? 0) / (393.0 / 375.0) - 27
+            } else if method == "page", let call = h.raw.calls.last {
+                offset += (call.params["distance"] as? Double ?? 1) * (852.0 * 2 / 3) / (393.0 / 375.0) - 27
             } else if method == "page_source", !drift.isEmpty, offset > 0 {
                 offset += drift.removeFirst()
             } else { return }

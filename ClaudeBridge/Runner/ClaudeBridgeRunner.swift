@@ -146,6 +146,10 @@ final class ClaudeBridgeRunner {
             AppMemory.shared.recordOpened(bundleId: app.bundleID, name: app.name)
         }
 
+        tools.jumpToElement = { bundle, text, contains, occurrence in
+            ClaudeBridgeJump.scrollToVisible(bundleID: bundle, text: text, contains: contains, occurrence: occurrence)
+        }
+
         let secrets = ClaudeBridgeSecretStore.shared
         secrets.ensureSecret()
         let mcp = BridgeMCPServer(auth: BridgePathSecretAuthenticator(secrets: secrets), tools: tools)

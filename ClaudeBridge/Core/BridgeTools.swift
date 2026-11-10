@@ -287,6 +287,7 @@ final class BridgeTools {
                     text += "\n\n[text read by OCR, with tap points]\n" + Self.jsonString(ocr)
                 }
                 var notes = [Self.scrollSummary(page["scroll_position"])]
+                self.lastScrolledPt = (page["scroll_position"] as? BridgeJSON).flatMap { Self.number($0["scrolled_pt"]) }
                 if !map.isIdentity {
                     notes.append("This app is shown scaled or in a window; the frames below have been converted to screen points and can be tapped as they are.")
                 }
@@ -478,6 +479,8 @@ final class BridgeTools {
     }
 
     private var windowCache: (key: String, at: TimeInterval, rect: BridgeUITree.Rect?)?
+    /// Last measured scroll offset, to tell whether a scroll moved anything.
+    private var lastScrolledPt: Double?
 
     /// Where a windowed app sits, read from SpringBoard's tree (cached briefly).
     private func windowOnScreen(for app: BridgeUITree.Rect) -> BridgeUITree.Rect? {
@@ -502,10 +505,23 @@ final class BridgeTools {
     }
 
     static let maxScrollSteps = 20
+    /// Most screens to cover in one jump.
+    static let maxJumpScreens = 12.0
+    /// Share of the scrolling area, at its top and bottom, that does not
+    /// count as "in view" while the list can still move.
+    static let edgeBand = 0.18
+    /// Strip at the top and bottom, in app points, that an element already
+    /// on screen must clear to be tapped without moving the list.
+    static let edgeStrip = 40.0
     static let maxSearchPages = 8
     static let settlePause: TimeInterval = 0.3
     /// Replaceable so tests do not wait.
     var sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
+    /// Asks the app to scroll an element into view by itself (an
+    /// accessibility action, supplied by the runner). Arguments: bundle id,
+    /// text, whether to match by "contains", which occurrence. Returns false
+    /// when the app would not do it; the bridge then scrolls by gesture.
+    var jumpToElement: ((String, String, Bool, Int) -> Bool)?
 
     /// Finds the element in the full UI tree and scrolls until its centre is
     /// showing. It does this itself, from row frames, because the device's
@@ -515,6 +531,7 @@ final class BridgeTools {
         var searched = 0
         var lastY: Double?
         var settledY: Double?
+        var triedJump = false
         let notFound = ElementError(message: "no element with that text was found, even after scrolling. Check the label with read_ui, or try match: contains.")
 
         for _ in 0..<Self.maxScrollSteps {
@@ -537,7 +554,20 @@ final class BridgeTools {
             }
             let node = hits[target.occurrence - 1]
             let frame = tree.effectiveFrame(of: node)
-            if tree.isInView(node) {
+            // "In view" has to mean comfortably inside the scrolling area,
+            // not just touching its edge: the top and bottom strips are often
+            // covered by a navigation bar, a sticky header or a button bar,
+            // and a tap there hits those instead. If the list cannot move
+            // any further (the element is near an end), the edge has to do.
+            let area = tree.visibleArea(for: node)
+            // Before any scrolling, an element the caller can already see
+            // only has to clear a small strip; once the list is being moved
+            // anyway, it is brought well inside.
+            let comfortable = area.map {
+                tree.isInView(node, margin: scrolls == 0 ? min(Self.edgeStrip, $0.height * Self.edgeBand) : $0.height * Self.edgeBand)
+            } ?? false
+            let stuck = lastY.map { abs($0 - frame.midY) < 1 } ?? false
+            if comfortable || (stuck && tree.isInView(node)) {
                 // After a scroll the list can still be gliding, and a tap on
                 // a moving list only stops it. Wait until two readings agree.
                 if scrolls > 0, settledY.map({ abs($0 - frame.midY) >= 1 }) ?? true {
@@ -548,25 +578,42 @@ final class BridgeTools {
                 return .success(FoundElement(x: map.screenX(frame.midX), y: map.screenY(frame.midY), scrolls: scrolls))
             }
             settledY = nil
-            guard let area = tree.visibleArea(for: node), !area.isEmpty else {
+            guard let area = area, !area.isEmpty else {
                 return .failure(ElementError(message: "the element is not inside anything that can be scrolled into view."))
+            }
+            // First choice: ask the app itself to bring the element into
+            // view. That is a jump, not a drag, however far away it is.
+            if !triedJump, case .allowed(let app) = probe.foreground, let jump = jumpToElement {
+                triedJump = true
+                if jump(app.bundleID, target.text, target.match == .contains, target.occurrence) {
+                    scrolls += 1
+                    sleep(Self.settlePause)
+                    continue
+                }
             }
             if let last = lastY, abs(last - frame.midY) < 1 {
                 return .failure(ElementError(message: "the element is there but the view would not scroll to it."))
             }
             lastY = frame.midY
 
-            // Drag the list by exactly the distance to the element, in steps
-            // of at most most of the visible area. Slow, so no momentum.
+            // Go straight there. A long way is covered in one call to the
+            // device's own paging, which takes several screens at a time
+            // without re-reading in between; the last stretch is an exact
+            // slow drag, so the element ends up in the middle of the view.
             let delta = frame.midY - area.midY
-            let step = min(abs(delta), area.height * 0.8)
-            _ = raw.call("swipe", [
-                "direction": delta > 0 ? "up" : "down",
-                "distance": map.screenHeight(step),
-                "velocity": "slow",
-                "x": map.screenX(area.midX),
-                "y": map.screenY(area.midY),
-            ])
+            let pageUnit = probe.pointHeight * 2 / 3
+            if abs(delta) > area.height * 0.8, pageUnit > 0 {
+                let screens = min(map.screenHeight(abs(delta)) / pageUnit, Self.maxJumpScreens)
+                _ = raw.call("page", ["direction": delta > 0 ? "down" : "up", "distance": screens])
+            } else {
+                _ = raw.call("swipe", [
+                    "direction": delta > 0 ? "up" : "down",
+                    "distance": map.screenHeight(abs(delta)),
+                    "velocity": "slow",
+                    "x": map.screenX(area.midX),
+                    "y": map.screenY(area.midY),
+                ])
+            }
             scrolls += 1
         }
         return .failure(ElementError(message: "it took too many scrolls to reach the element; try scroll to get closer first."))
@@ -579,12 +626,17 @@ final class BridgeTools {
             return .error(quoted("scroll failed", message))
         case .success(let body):
             var lines: [String] = []
-            switch body["moved"] as? Bool {
+            // The measured position is better evidence than the device's
+            // "moved" flag, which reads false after a multi-screen scroll.
+            var moved = body["moved"] as? Bool
+            let scrolledPt = (body["position"] as? BridgeJSON).flatMap { Self.number($0["scrolled_pt"]) }
+            if let now = scrolledPt, let before = lastScrolledPt { moved = abs(now - before) > 2 }
+            if let now = scrolledPt { lastScrolledPt = now }
+            switch moved {
             case true?: lines.append("scroll: moved.")
             case false?: lines.append("scroll: did not move. You are at the end of the content in that direction.")
             case nil: lines.append("scroll: done. The device did not report whether the content moved; read the screen to check.")
             }
-            if (body["at_end"] as? Bool) == true { lines.append("This is the end of the content in that direction.") }
             if body["position"] != nil { lines.append(Self.scrollSummary(body["position"])) }
             return .text(lines.joined(separator: "\n"))
         }

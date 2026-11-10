@@ -215,6 +215,29 @@ Found while driving a food-ordering menu in Grab on iOS 27.2, and fixed in
 Verified on the phone: `tap_element` selected items one and four screens down
 the list, and the basket total changed to match.
 
+### Getting to a far-away element
+
+`scroll_to` and `tap_element` reach an element in this order:
+
+1. **Ask the app to jump.** The runner performs the accessibility "scroll to
+   visible" action on the element (`ClaudeBridgeJump`). The app scrolls itself
+   straight there, however far it is. On a menu 38 screens long this took one
+   step; the element lookup costs about 3.5 s.
+2. **Bring it well inside the view.** The jump tends to leave the element at
+   the very edge, under a navigation bar or sticky header, where a tap misses.
+   Once the list is being moved, the element must clear 18% of the area at the
+   top and bottom; one exact slow drag does that.
+3. **Fall back to gestures** if the app will not jump: one call to the
+   device's paging for the long stretch, then the exact drag.
+
+`contains` matching finds the first element whose label contains the text,
+which can be a description rather than a title. Searching for "Veggie Delite"
+opened a meal whose description mentioned it; the exact label
+("Veggie Delite™ 6 Inch") found the right row.
+
+`scroll` reports whether it moved from the measured position, because the
+device's own "moved" flag reads false after a multi-screen scroll.
+
 Not handled: horizontal scrolling to an element, and lists that only build
 rows as you scroll are searched by paging down only (not up).
 
