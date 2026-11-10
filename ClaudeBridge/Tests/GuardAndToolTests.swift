@@ -500,4 +500,28 @@ final class GuardAndToolTests: XCTestCase {
         XCTAssertEqual(h.call("read_ui").status, .lockedOut)
         XCTAssertEqual(h.call("launch_app", ["bundle_id": "com.apple.Preferences"]).status, .refused)
     }
+
+    func testNoAppIsAllowedByDefaultAndAnyAppCanBeListed() {
+        // An empty list means only the home screen and search are permitted.
+        let empty = Harness(apps: [])
+        empty.raw.foreground = whatsApp
+        XCTAssertEqual(empty.call("read_ui").status, .lockedOut)
+        XCTAssertEqual(empty.call("launch_app", ["bundle_id": whatsApp]).status, .refused)
+
+        // Any other app works the same way once it is on the list.
+        let other = Harness(apps: [BridgeKnownLinks.app(bundleID: "com.example.notes", name: "Notes")])
+        other.raw.foreground = "com.example.notes"
+        XCTAssertFalse(other.call("read_ui").isError)
+        other.raw.foreground = whatsApp
+        XCTAssertEqual(other.call("read_ui").status, .lockedOut)
+    }
+
+    func testOpenURLUsesTheLinkTableOnlyForListedApps() {
+        let telegram = BridgeKnownLinks.app(bundleID: "ph.telegra.Telegraph", name: "Telegram")
+        let h = Harness(apps: [telegram])
+        XCTAssertFalse(h.call("open_url", ["url": "tg://resolve?domain=x"]).isError)
+        XCTAssertEqual(h.call("open_url", ["url": "whatsapp://send"]).status, .refused, "WhatsApp is not on this list")
+        let unknown = Harness(apps: [BridgeKnownLinks.app(bundleID: "com.example.notes", name: "Notes")])
+        XCTAssertEqual(unknown.call("open_url", ["url": "notes://x"]).status, .refused, "no known links for this app")
+    }
 }

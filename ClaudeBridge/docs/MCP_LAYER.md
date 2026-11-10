@@ -150,20 +150,41 @@ a few seconds and read the log. On iOS 27.2 that showed:
 
 ## The allowlist
 
-Edited in the companion app: Claude Bridge → Allowed apps. Add an app by name
-(looked up through the runner's catalogue, then the App Store) or by bundle
-id, mark it read-only, or swipe to remove it. The list is stored in the runner
-and is read fresh on every tool call, so a change applies immediately.
+Edited in the companion app: Claude Bridge → Allowed apps. The screen lists
+the installed apps, each with a switch; an allowed app also gets a read-only
+switch. The list is stored in the runner and read fresh on every tool call,
+so a change applies immediately. It is changed through the companion's
+`claude_bridge` method (`set_allowlist`), never through MCP.
 
-It is changed through the companion's `claude_bridge` method
-(`set_allowlist`), never through MCP.
+**It starts empty.** Until an app is switched on, Claude can only see the home
+screen and search. No app is special in the code: WhatsApp is one row like any
+other.
 
-Some apps can never be added, and are ignored even if they somehow end up in
-the stored list: Settings, the App Store, Wallet, Shortcuts, TestFlight,
-SpringBoard, and iCTRL's own companion and runner. The home screen and system
-search are always permitted and are not part of the list.
+### Where the list of installed apps comes from
 
-An empty list is valid: Claude then sees only the home screen and search.
-Until the list is first edited it contains WhatsApp.
+iOS has no public way to list installed apps and refuses the usual private
+ones. Measured on iOS 27.2:
+
+| Route | Apps found |
+|---|---|
+| `LSApplicationWorkspace` (all applications) | 0 |
+| `LSApplicationRecord` enumeration | 0 |
+| Apps that contain an extension (via the plug-in list) | 198 |
+| Apps this runner has opened before | 11 |
+
+The screen shows the last two combined. Most apps include at least one
+extension, but one that does not, and has never been opened through iCTRL,
+will be missing; it can be added by bundle id at the bottom of the screen.
+
+### Rules
+
+- Never allowed, and ignored even if stored: Settings, the App Store, Wallet,
+  Shortcuts, TestFlight, SpringBoard, and iCTRL's own companion and runner.
+- The home screen and system search are always permitted and are not part of
+  the list.
+- `open_url` only works for apps whose link formats are known
+  (`BridgeKnownLinks`: currently WhatsApp, Telegram and Signal) and only when
+  that app is on the list. Other apps can still be opened with `launch_app`.
+- Read-only blocks typing. Taps on send buttons are not detected.
 
 Not yet tried on a phone.

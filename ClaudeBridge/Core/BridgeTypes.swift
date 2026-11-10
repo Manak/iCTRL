@@ -29,12 +29,25 @@ struct BridgeAllowedApp: Equatable {
     /// https hosts whose links open this app (lowercase).
     var urlHosts: [String] = []
 
-    static let whatsApp = BridgeAllowedApp(
-        bundleID: "net.whatsapp.WhatsApp",
-        name: "WhatsApp",
-        urlSchemes: ["whatsapp"],
-        urlHosts: ["wa.me", "api.whatsapp.com", "chat.whatsapp.com"]
-    )
+}
+
+/// Link formats of some common apps, so `open_url` can tell which app a URL
+/// belongs to. This is reference data, not policy: an app is only usable if
+/// the owner put it on the allowlist, and an app that is not in this table
+/// simply has no deep links (`launch_app` still works for it).
+enum BridgeKnownLinks {
+    static let table: [String: (schemes: [String], hosts: [String])] = [
+        "net.whatsapp.WhatsApp": (["whatsapp"], ["wa.me", "api.whatsapp.com", "chat.whatsapp.com"]),
+        "ph.telegra.Telegraph": (["tg"], ["t.me"]),
+        "org.whispersystems.signal": (["sgnl"], ["signal.me"]),
+    ]
+
+    /// An allowlist entry for `bundleID`, with its known links filled in.
+    static func app(bundleID: String, name: String, readOnly: Bool = false) -> BridgeAllowedApp {
+        let links = table[bundleID]
+        return BridgeAllowedApp(bundleID: bundleID, name: name, readOnly: readOnly,
+                                urlSchemes: links?.schemes ?? [], urlHosts: links?.hosts ?? [])
+    }
 }
 
 /// Rules for what may be put on the allowlist at all.

@@ -18,6 +18,7 @@ import UserNotifications
 /// | rotate_secret   |                 | url (new secret; old one is dead)       |
 /// | set_auth_key    | auth_key        | status                                  |
 /// | action_log      |                 | entries: time, tool, status             |
+/// | installed_apps  |                 | apps the phone reports as installed     |
 /// | set_allowlist   | apps: [...]     | status + rejected bundle ids            |
 /// | end_session     |                 | stops bridge, raw API and the runner    |
 /// | live_activity   | showing: bool   | status; withholds the status notification |
@@ -60,6 +61,13 @@ enum ClaudeBridgeAdmin {
             }
             iCTRLUITests.logBuffer.append(key.isEmpty ? "🤖🔑 Tailscale auth key cleared" : "🤖🔑 Tailscale auth key stored")
             return (status(), nil)
+
+        case "installed_apps":
+            let listing = ClaudeBridgeInstalledApps.list()
+            let apps: [JSONValue] = listing.apps
+                .filter { !BridgeAllowlistPolicy.isForbidden($0.bundleID) && BridgeAllowlistPolicy.isValidBundleID($0.bundleID) }
+                .map { .object(["bundle_id": .string($0.bundleID), "name": .string($0.name), "user": .bool($0.isUser)]) }
+            return (["source": .string(listing.source), "partial": .bool(listing.partial), "apps": .array(apps)], nil)
 
         case "set_allowlist":
             guard case .array(let items)? = params["apps"] else {

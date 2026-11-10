@@ -62,6 +62,11 @@ final class MutableSecret: BridgeSecretSource {
     init(_ s: String?) { currentSecret = s }
 }
 
+extension BridgeAllowedApp {
+    /// Test fixture: one ordinary allowlisted app with deep links.
+    static let whatsApp = BridgeKnownLinks.app(bundleID: "net.whatsapp.WhatsApp", name: "WhatsApp")
+}
+
 let whatsApp = BridgeAllowedApp.whatsApp.bundleID
 let safari = "com.apple.mobilesafari"
 

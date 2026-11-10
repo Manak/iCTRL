@@ -166,6 +166,7 @@ final class ClaudeBridgeRunner {
             idle.start()
             if ProcessInfo.processInfo.environment["ICTRL_BRIDGE_DIAG"] == "1" {
                 ClaudeBridgeDiagnostics.start(raw: raw, log: Self.log)
+                Self.log("🤖🔬 installed-app routes: \(ClaudeBridgeInstalledApps.counts())")
             }
             if Self.keepAwakeEnabled {
                 keepAwake.start()
@@ -268,31 +269,23 @@ final class ClaudeBridgeRawAPI: BridgeRawAPI {
 
 // MARK: - Allowlist
 
-/// The allowlist, read from the runner's own defaults. Nothing in the MCP
-/// layer writes it. Editing from the companion app arrives in a later stage;
-/// until then it is WhatsApp only.
+/// The allowlist, kept in the runner's own defaults and edited from the
+/// companion app. Nothing in the MCP layer writes it. It starts empty.
 struct ClaudeBridgeAllowlistStore: BridgeAllowlistProvider {
     static let key = "claudeBridge.allowlist"
 
     /// Read fresh on every use, so an edit from the companion applies to the
     /// very next tool call. Always passed through the policy filter.
     var allowedApps: [BridgeAllowedApp] {
-        guard let stored = UserDefaults.standard.array(forKey: Self.key) as? [[String: Any]] else {
-            return [.whatsApp]
-        }
+        // Nothing is allowed until the owner switches an app on.
+        let stored = UserDefaults.standard.array(forKey: Self.key) as? [[String: Any]] ?? []
         return BridgeAllowlistPolicy.sanitize(stored.compactMap(Self.app(from:)))
     }
 
     static func app(from entry: [String: Any]) -> BridgeAllowedApp? {
         guard let bundle = entry["bundle_id"] as? String, !bundle.isEmpty else { return nil }
-        // WhatsApp keeps its built-in link handling whatever the entry says.
-        let builtIn = bundle == BridgeAllowedApp.whatsApp.bundleID ? BridgeAllowedApp.whatsApp : nil
-        return BridgeAllowedApp(
-            bundleID: bundle,
-            name: (entry["name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? builtIn?.name ?? bundle,
-            readOnly: entry["read_only"] as? Bool ?? false,
-            urlSchemes: (entry["url_schemes"] as? [String])?.map { $0.lowercased() } ?? builtIn?.urlSchemes ?? [],
-            urlHosts: (entry["url_hosts"] as? [String])?.map { $0.lowercased() } ?? builtIn?.urlHosts ?? [])
+        let name = (entry["name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? bundle
+        return BridgeKnownLinks.app(bundleID: bundle, name: name, readOnly: entry["read_only"] as? Bool ?? false)
     }
 
     /// Stores a new list. Returns what was actually kept after filtering.
@@ -300,8 +293,7 @@ struct ClaudeBridgeAllowlistStore: BridgeAllowlistProvider {
     static func save(_ apps: [BridgeAllowedApp]) -> [BridgeAllowedApp] {
         let kept = BridgeAllowlistPolicy.sanitize(apps)
         let stored: [[String: Any]] = kept.map {
-            ["bundle_id": $0.bundleID, "name": $0.name, "read_only": $0.readOnly,
-             "url_schemes": $0.urlSchemes, "url_hosts": $0.urlHosts]
+            ["bundle_id": $0.bundleID, "name": $0.name, "read_only": $0.readOnly]
         }
         UserDefaults.standard.set(stored, forKey: key)
         // Make sure the runner can recognise each app when it is in front.
