@@ -42,6 +42,7 @@ struct ClaudeBridgeStatus: Equatable {
     /// When the session ends if Claude stays quiet.
     var endsAt: Date?
     var idleLimitMinutes = 30.0
+    var allowedAppNames: [String] = []
 
     init() {}
 
@@ -57,6 +58,7 @@ struct ClaudeBridgeStatus: Equatable {
         sessionStarted = (result["session_started"] as? Double).map(Date.init(timeIntervalSince1970:))
         endsAt = (result["ends_at"] as? Double).map(Date.init(timeIntervalSince1970:))
         idleLimitMinutes = result["idle_limit_minutes"] as? Double ?? 30
+        allowedAppNames = (result["allowed_apps"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }
     }
 }
 
@@ -181,6 +183,7 @@ struct ClaudeBridgeView: View {
                 }
             } else if let status = model.status {
                 modeSection(status)
+                allowlistSection(status)
                 addressSection(status)
                 tailscaleSection(status)
             } else {
@@ -265,6 +268,25 @@ struct ClaudeBridgeView: View {
             }
         } footer: {
             Text("While this is on, the raw iCTRL API is limited to this device and only the Claude bridge is reachable from outside. The session ends by itself after \(Int(status.idleLimitMinutes)) minutes without a request from Claude. Stop session shuts down the address, the bridge and the runner.")
+        }
+    }
+
+    private func allowlistSection(_ status: ClaudeBridgeStatus) -> some View {
+        Section {
+            NavigationLink {
+                ClaudeBridgeAllowlistView()
+            } label: {
+                HStack {
+                    Label("Allowed apps", systemImage: "checklist")
+                    Spacer()
+                    Text(status.allowedAppNames.isEmpty ? "None" : status.allowedAppNames.prefix(2).joined(separator: ", ")
+                         + (status.allowedAppNames.count > 2 ? " +\(status.allowedAppNames.count - 2)" : ""))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+            }
+        } footer: {
+            Text("Claude can only read and act inside these apps, the home screen and search.")
         }
     }
 

@@ -166,20 +166,25 @@ changing the Tailscale version in `go.mod`.
 
 ## Keep-awake while a session runs
 
-Added alongside this stage. A backgrounded runner cannot switch off the idle
-timer, so while the bridge runs it sends a tiny touch after about 12 seconds of
-inactivity: a tap on the last point of the bottom edge, under the home
-indicator. A tool call counts as activity and postpones it.
+A backgrounded runner cannot switch off the idle timer, so while the bridge
+runs it sends an input event after about 12 seconds without input. A tool
+call counts as input and postpones it.
 
-It only fires while the home screen, system search or an allowlisted app is
-in front. During a lockout nothing is touched, so the phone can auto-lock
-then. It is on by default with the bridge; set the `claudeBridge.keepAwake`
-default to false (or `ICTRL_BRIDGE_KEEP_AWAKE=0` for one run) to let the
-phone lock as usual.
+The event is a bare Control-key press and release on a virtual hardware
+keyboard. It does not touch the screen. It is sent whatever app is in front,
+but never while the phone is locked (a key event would wake the display), and
+that includes while Notification Centre is down.
 
-Tested on the phone (iOS 27.2, Auto-Lock at 30 seconds): with pulses about
-every 16 seconds the phone stayed unlocked on the home screen; without a
-timely pulse it locked at 29 seconds. A pulse first reads the foreground,
-which on the home screen takes about a second of work each time. Still to
-check: that the tap is harmless inside WhatsApp and in search over a long
-session, and the battery cost.
+It is on by default with the bridge; set the `claudeBridge.keepAwake` default
+to false to let the phone lock as usual.
+
+History, and what is verified:
+
+- **First version: a tap on the bottom edge.** On the phone it did hold a
+  30-second Auto-Lock (19 minutes), but the taps landed on real controls and
+  opened chats. Removed.
+- **Current version: the modifier key.** Unit-tested. **Not yet verified on
+  the phone**: that iOS counts it as activity, and that it has no visible
+  side effect (for example on the on-screen keyboard). If it does not hold
+  the lock, the next candidates are a pointer move without a click, or
+  setting Auto-Lock to Never through the Settings app at session start.

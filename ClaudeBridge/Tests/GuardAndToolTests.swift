@@ -397,57 +397,43 @@ final class GuardAndToolTests: XCTestCase {
 
     // MARK: Keep awake
 
-    private func keepAwake(_ h: Harness) -> BridgeKeepAwake {
-        BridgeKeepAwake(raw: h.raw, guardian: h.guardian, clock: h.clock, interval: 20)
-    }
-
-    func testKeepAwakeTapsBottomEdgeWhenIdle() {
+    func testKeepAwakeSendsAnEventWhenIdleAndNeverTouchesTheScreen() {
         let h = Harness()
-        h.raw.foreground = whatsApp
-        let k = keepAwake(h)
+        var events = 0
+        let k = BridgeKeepAwake(clock: h.clock, interval: 12, isLocked: { false }, sendEvent: { events += 1; return true })
         XCTAssertEqual(k.pulseIfDue(), .notDue)
-        h.clock.uptime += 21
+        h.clock.uptime += 13
         XCTAssertEqual(k.pulseIfDue(), .pulsed)
-        let tap = h.raw.calls.first { $0.method == "tap" }!.params
-        XCTAssertEqual(tap["y"] as? Double, 851)       // last point of an 852 pt screen
-        XCTAssertEqual(tap["x"] as? Double, 196.5)
-        XCTAssertEqual(tap["settle"] as? Bool, false)
+        XCTAssertEqual(events, 1)
         XCTAssertEqual(k.pulseIfDue(), .notDue, "one pulse per interval")
+        XCTAssertEqual(h.raw.calls.count, 0, "keep-awake makes no raw API call: no tap, no screen read")
     }
 
     func testKeepAwakeSkipsAfterRecentToolCall() {
-        let h = Harness()
-        let k = keepAwake(h)
-        h.clock.uptime += 15
+        let clock = TestClock()
+        var events = 0
+        let k = BridgeKeepAwake(clock: clock, interval: 12, isLocked: { false }, sendEvent: { events += 1; return true })
+        clock.uptime += 10
         k.noteActivity()
-        h.clock.uptime += 15
+        clock.uptime += 10
         XCTAssertEqual(k.pulseIfDue(), .notDue)
-        XCTAssertEqual(h.raw.actionCalls, [])
+        XCTAssertEqual(events, 0)
     }
 
-    func testKeepAwakeNeverTouchesABlockedOrLockedScreen() {
-        for setup in [{ (h: Harness) in h.raw.foreground = safari },
-                      { (h: Harness) in h.raw.screenLocked = true },
-                      { (h: Harness) in h.raw.springboardSource = MockRawAPI.appSwitcherSource },
-                      { (h: Harness) in h.raw.deviceInfoFails = true }] {
-            let h = Harness()
-            setup(h)
-            let k = keepAwake(h)
-            h.clock.uptime += 60
-            XCTAssertEqual(k.pulseIfDue(), .skipped)
-            XCTAssertEqual(h.raw.actionCalls, [])
-        }
+    func testKeepAwakeSendsNothingWhileLocked() {
+        let clock = TestClock()
+        var events = 0
+        let k = BridgeKeepAwake(clock: clock, interval: 12, isLocked: { true }, sendEvent: { events += 1; return true })
+        clock.uptime += 60
+        XCTAssertEqual(k.pulseIfDue(), .skipped)
+        XCTAssertEqual(events, 0)
     }
 
-    func testKeepAwakeProbeDoesNotLogALockout() {
-        let h = Harness()
-        h.raw.foreground = safari
-        var lockouts = 0
-        h.guardian.onLockout = { lockouts += 1 }
-        let k = keepAwake(h)
-        h.clock.uptime += 60
-        _ = k.pulseIfDue()
-        XCTAssertEqual(lockouts, 0)
+    func testKeepAwakeReportsFailure() {
+        let clock = TestClock()
+        let k = BridgeKeepAwake(clock: clock, interval: 12, isLocked: { false }, sendEvent: { false })
+        clock.uptime += 60
+        XCTAssertEqual(k.pulseIfDue(), .failed)
     }
 
     // MARK: Idle shutdown
@@ -488,5 +474,30 @@ final class GuardAndToolTests: XCTestCase {
         clock.uptime += 1_000_000
         XCTAssertFalse(idle.check())
         XCTAssertNil(idle.remaining)
+    }
+
+    // MARK: Allowlist policy
+
+    func testSettingsWalletAndTheCompanionCanNeverBeAllowlisted() {
+        for id in ["com.apple.Preferences", "com.apple.AppStore", "com.apple.Passbook", "com.apple.springboard",
+                   "com.openminis.abc123.ictrl", "com.openminis.abc123.ictrl.uitests.xctrunner"] {
+            XCTAssertTrue(BridgeAllowlistPolicy.isForbidden(id), id)
+        }
+        XCTAssertFalse(BridgeAllowlistPolicy.isForbidden("net.whatsapp.WhatsApp"))
+    }
+
+    func testSanitizeDropsForbiddenMalformedAndDuplicateEntries() {
+        let apps = ["net.whatsapp.WhatsApp", "com.apple.Preferences", "not a bundle", "nodots",
+                    "net.whatsapp.WhatsApp", "ph.telegra.Telegraph", ".bad."]
+            .map { BridgeAllowedApp(bundleID: $0, name: $0) }
+        XCTAssertEqual(BridgeAllowlistPolicy.sanitize(apps).map(\.bundleID), ["net.whatsapp.WhatsApp", "ph.telegra.Telegraph"])
+    }
+
+    func testForbiddenAppInFrontIsBlockedEvenIfSomehowListed() {
+        // A stored list is sanitized on read, so Settings in front is a lockout.
+        let h = Harness(apps: BridgeAllowlistPolicy.sanitize([.whatsApp, BridgeAllowedApp(bundleID: "com.apple.Preferences", name: "Settings")]))
+        h.raw.foreground = "com.apple.Preferences"
+        XCTAssertEqual(h.call("read_ui").status, .lockedOut)
+        XCTAssertEqual(h.call("launch_app", ["bundle_id": "com.apple.Preferences"]).status, .refused)
     }
 }

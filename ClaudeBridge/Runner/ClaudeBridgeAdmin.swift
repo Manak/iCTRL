@@ -18,6 +18,7 @@ import UserNotifications
 /// | rotate_secret   |                 | url (new secret; old one is dead)       |
 /// | set_auth_key    | auth_key        | status                                  |
 /// | action_log      |                 | entries: time, tool, status             |
+/// | set_allowlist   | apps: [...]     | status + rejected bundle ids            |
 /// | end_session     |                 | stops bridge, raw API and the runner    |
 /// | live_activity   | showing: bool   | status; withholds the status notification |
 enum ClaudeBridgeAdmin {
@@ -59,6 +60,27 @@ enum ClaudeBridgeAdmin {
             }
             iCTRLUITests.logBuffer.append(key.isEmpty ? "🤖🔑 Tailscale auth key cleared" : "🤖🔑 Tailscale auth key stored")
             return (status(), nil)
+
+        case "set_allowlist":
+            guard case .array(let items)? = params["apps"] else {
+                return (nil, .serverError("claude_bridge set_allowlist: 'apps' must be a list"))
+            }
+            var requested: [BridgeAllowedApp] = []
+            var rejected: [JSONValue] = []
+            for item in items {
+                guard let entry = item.toAny() as? [String: Any],
+                      let app = ClaudeBridgeAllowlistStore.app(from: entry) else { continue }
+                if !BridgeAllowlistPolicy.isValidBundleID(app.bundleID) || BridgeAllowlistPolicy.isForbidden(app.bundleID) {
+                    rejected.append(.string(app.bundleID))
+                } else {
+                    requested.append(app)
+                }
+            }
+            let kept = ClaudeBridgeAllowlistStore.save(requested)
+            iCTRLUITests.logBuffer.append("🤖📋 Allowlist changed from the phone: \(kept.count) app(s)")
+            var out = status()
+            out["rejected"] = .array(rejected)
+            return (out, nil)
 
         case "end_session":
             iCTRLUITests.logBuffer.append("🤖🛑 Session ended from the phone")

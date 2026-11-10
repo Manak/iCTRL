@@ -37,6 +37,51 @@ struct BridgeAllowedApp: Equatable {
     )
 }
 
+/// Rules for what may be put on the allowlist at all.
+enum BridgeAllowlistPolicy {
+    static let maxApps = 50
+
+    /// Never allowed, whatever the stored list says: the apps that control
+    /// the phone, its money and its installs. SpringBoard is listed because
+    /// "home" is granted through the home-screen check, not through the list.
+    static let neverAllowed: Set<String> = [
+        "com.apple.springboard",
+        "com.apple.Preferences",       // Settings
+        "com.apple.AppStore",
+        "com.apple.Passbook",          // Wallet
+        "com.apple.PassbookUIService",
+        "com.apple.shortcuts",
+        "com.apple.TestFlight",
+    ]
+
+    /// Suffixes of this project's own apps: the companion (which can copy
+    /// the connector address) and the runner.
+    static let neverAllowedSuffixes = [".ictrl", ".ictrl.uitests.xctrunner", ".ictrl.bridgewidget"]
+
+    static func isForbidden(_ bundleID: String) -> Bool {
+        neverAllowed.contains(bundleID) || neverAllowedSuffixes.contains { bundleID.hasSuffix($0) }
+    }
+
+    /// A plausible bundle identifier: reverse-DNS, two or more parts.
+    static func isValidBundleID(_ id: String) -> Bool {
+        guard id.count <= 155, id.contains(".") else { return false }
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-.")
+        return id.unicodeScalars.allSatisfy(allowed.contains) && !id.hasPrefix(".") && !id.hasSuffix(".")
+    }
+
+    /// Cleans a list before it is stored or used: drops forbidden and
+    /// malformed entries and duplicates, and caps the length.
+    static func sanitize(_ apps: [BridgeAllowedApp]) -> [BridgeAllowedApp] {
+        var seen = Set<String>()
+        var out: [BridgeAllowedApp] = []
+        for app in apps where isValidBundleID(app.bundleID) && !isForbidden(app.bundleID) && seen.insert(app.bundleID).inserted {
+            out.append(app)
+            if out.count == maxApps { break }
+        }
+        return out
+    }
+}
+
 /// The allowlist is owned by the phone. Nothing in the MCP layer can write it.
 protocol BridgeAllowlistProvider {
     var allowedApps: [BridgeAllowedApp] { get }

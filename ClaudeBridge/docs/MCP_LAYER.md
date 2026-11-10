@@ -78,7 +78,7 @@ There is no tool that changes the allowlist.
 | App switcher in front | Locked out (after the home-screen check was added) |
 | Control Centre, over the home screen or over WhatsApp | Locked out. iOS makes SpringBoard the front app while it is open, and the icon grid is not visible, so the home-screen check fails |
 | Notification Centre, over the home screen or over WhatsApp | Refused as `phone locked`. iOS reports the screen as locked while that sheet is down |
-| Keep-awake | With Auto-Lock at 30 s, the phone stayed unlocked for 19 idle minutes |
+| Keep-awake (first version, a bottom-edge tap) | Held a 30 s Auto-Lock for 19 minutes, but the taps hit real controls; replaced by a key event that is not yet verified (see FUNNEL.md) |
 | `go_home` | About 1.9 s from Safari or WhatsApp to a verified home screen |
 | Runner log | Tool name and status only; typed text and the secret do not appear |
 | Guard overhead | 40 to 100 ms per call in an app; about 450 ms more on the home screen |
@@ -106,8 +106,7 @@ What the phone test changed:
 - **No way to read the URL yet.** Showing and rotating the connector URL comes
   with Stage 4 and the companion app. Until then a development run uses
   `ICTRL_BRIDGE_DEV_SECRET`.
-- **The allowlist is WhatsApp only**, read from the runner's defaults. Editing
-  it from the companion app is Stage 5/6.
+- **Read-only apps block typing only.** Taps on send buttons are not detected.
 - **Raw API visibility is not yet forced to "this device only"** while the
   bridge runs. That hook lands with Funnel in Stage 3.
 
@@ -148,3 +147,23 @@ a few seconds and read the log. On iOS 27.2 that showed:
 | Notification Centre (anywhere) | SpringBoard | **true** | `NotificationShortLookView` |
 | Pull-down search | `com.apple.campo` | false | |
 | An app | that app | false | |
+
+## The allowlist
+
+Edited in the companion app: Claude Bridge → Allowed apps. Add an app by name
+(looked up through the runner's catalogue, then the App Store) or by bundle
+id, mark it read-only, or swipe to remove it. The list is stored in the runner
+and is read fresh on every tool call, so a change applies immediately.
+
+It is changed through the companion's `claude_bridge` method
+(`set_allowlist`), never through MCP.
+
+Some apps can never be added, and are ignored even if they somehow end up in
+the stored list: Settings, the App Store, Wallet, Shortcuts, TestFlight,
+SpringBoard, and iCTRL's own companion and runner. The home screen and system
+search are always permitted and are not part of the list.
+
+An empty list is valid: Claude then sees only the home screen and search.
+Until the list is first edited it contains WhatsApp.
+
+Not yet tried on a phone.

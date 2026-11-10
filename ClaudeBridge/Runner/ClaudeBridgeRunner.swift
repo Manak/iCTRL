@@ -118,7 +118,10 @@ final class ClaudeBridgeRunner {
         let clock = BridgeSystemClock()
         let guardian = BridgeGuard(raw: raw, allowlist: allowlist)
         guardian.onLockout = { Self.log("🤖⛔️ Claude bridge locked out: non-allowlisted app in foreground") }
-        let keepAwake = BridgeKeepAwake(raw: raw, guardian: guardian, clock: clock)
+        let keepAwake = BridgeKeepAwake(
+            clock: clock,
+            isLocked: { LockStateMonitor.shared().isLocked },
+            sendEvent: { ClaudeBridgeIdleEvent.send() })
         actionLog.onAppend = { [weak keepAwake] entry in
             // Tool name and status only. Never arguments or screen content.
             Self.log("🤖 MCP \(entry.tool) → \(entry.status.rawValue)")
@@ -167,7 +170,7 @@ final class ClaudeBridgeRunner {
             if Self.keepAwakeEnabled {
                 keepAwake.start()
                 self.keepAwake = keepAwake
-                Self.log("🤖 keep-awake on: the phone will not auto-lock while a permitted screen is in front")
+                Self.log("🤖 keep-awake on: the phone will not auto-lock during the session")
             }
             // "Claude via Funnel": publish the listener through Tailscale.
             // Without it the bridge stays reachable on this device only.
@@ -271,19 +274,41 @@ final class ClaudeBridgeRawAPI: BridgeRawAPI {
 struct ClaudeBridgeAllowlistStore: BridgeAllowlistProvider {
     static let key = "claudeBridge.allowlist"
 
+    /// Read fresh on every use, so an edit from the companion applies to the
+    /// very next tool call. Always passed through the policy filter.
     var allowedApps: [BridgeAllowedApp] {
         guard let stored = UserDefaults.standard.array(forKey: Self.key) as? [[String: Any]] else {
             return [.whatsApp]
         }
-        return stored.compactMap { entry in
-            guard let bundle = entry["bundle_id"] as? String, !bundle.isEmpty else { return nil }
-            return BridgeAllowedApp(
-                bundleID: bundle,
-                name: entry["name"] as? String ?? bundle,
-                readOnly: entry["read_only"] as? Bool ?? false,
-                urlSchemes: (entry["url_schemes"] as? [String] ?? []).map { $0.lowercased() },
-                urlHosts: (entry["url_hosts"] as? [String] ?? []).map { $0.lowercased() })
+        return BridgeAllowlistPolicy.sanitize(stored.compactMap(Self.app(from:)))
+    }
+
+    static func app(from entry: [String: Any]) -> BridgeAllowedApp? {
+        guard let bundle = entry["bundle_id"] as? String, !bundle.isEmpty else { return nil }
+        // WhatsApp keeps its built-in link handling whatever the entry says.
+        let builtIn = bundle == BridgeAllowedApp.whatsApp.bundleID ? BridgeAllowedApp.whatsApp : nil
+        return BridgeAllowedApp(
+            bundleID: bundle,
+            name: (entry["name"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? builtIn?.name ?? bundle,
+            readOnly: entry["read_only"] as? Bool ?? false,
+            urlSchemes: (entry["url_schemes"] as? [String])?.map { $0.lowercased() } ?? builtIn?.urlSchemes ?? [],
+            urlHosts: (entry["url_hosts"] as? [String])?.map { $0.lowercased() } ?? builtIn?.urlHosts ?? [])
+    }
+
+    /// Stores a new list. Returns what was actually kept after filtering.
+    @discardableResult
+    static func save(_ apps: [BridgeAllowedApp]) -> [BridgeAllowedApp] {
+        let kept = BridgeAllowlistPolicy.sanitize(apps)
+        let stored: [[String: Any]] = kept.map {
+            ["bundle_id": $0.bundleID, "name": $0.name, "read_only": $0.readOnly,
+             "url_schemes": $0.urlSchemes, "url_hosts": $0.urlHosts]
         }
+        UserDefaults.standard.set(stored, forKey: key)
+        // Make sure the runner can recognise each app when it is in front.
+        for app in kept where AppMemory.shared.entry(for: app.bundleID) == nil {
+            AppMemory.shared.recordOpened(bundleId: app.bundleID, name: app.name)
+        }
+        return kept
     }
 }
 
@@ -369,6 +394,48 @@ final class ClaudeBridgeSecretStore: BridgeSecretSource {
         cached = secret
         loaded = true
         return false
+    }
+}
+
+// MARK: - Keep-awake event
+
+/// The input event keep-awake sends: Control pressed and released on a
+/// virtual hardware keyboard. It never touches the screen, so it cannot tap
+/// a control, and a bare modifier key does nothing in any app.
+enum ClaudeBridgeIdleEvent {
+    /// XCUIKeyModifierFlags.control
+    private static let control: UInt = 1 << 2
+    private static var loggedFailure = false
+
+    static func send() -> Bool {
+        var ok = false
+        // XCTest event synthesis is main-thread only in this runner.
+        if Thread.isMainThread { ok = sendOnMain() } else { DispatchQueue.main.sync { ok = sendOnMain() } }
+        if !ok, !loggedFailure {
+            loggedFailure = true
+            iCTRLUITests.logBuffer.append("🤖🔴 keep-awake event could not be sent; the phone may auto-lock")
+        }
+        return ok
+    }
+
+    private static func sendOnMain() -> Bool {
+        // -[XCPointerEventPath setModifiers:mergeWithCurrentModifierFlags:atOffset:]
+        // is not in the bridging header, so it is called through its IMP.
+        let selector = NSSelectorFromString("setModifiers:mergeWithCurrentModifierFlags:atOffset:")
+        let path = XCPointerEventPath(forTextInput: ())
+        guard path.responds(to: selector),
+              let implementation = class_getMethodImplementation(type(of: path), selector) else { return false }
+        typealias SetModifiers = @convention(c) (AnyObject, Selector, UInt, Bool, TimeInterval) -> Void
+        let setModifiers = unsafeBitCast(implementation, to: SetModifiers.self)
+        var ok = false
+        let failure = ObjCException.catching {
+            setModifiers(path, selector, control, false, 0)
+            setModifiers(path, selector, 0, false, 0.05)
+            let record = XCSynthesizedEventRecord(name: "Claude Bridge keep-awake")
+            record.add(path)
+            ok = (try? record.synthesize()) != nil
+        }
+        return failure == nil && ok
     }
 }
 
