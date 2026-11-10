@@ -174,6 +174,12 @@ final class BridgeGuard {
         }
     }
 
+    /// Runs `body` with no tool call in flight (and none starting meanwhile).
+    func exclusive<T>(_ body: () -> T) -> T {
+        runLock.lock(); defer { runLock.unlock() }
+        return body()
+    }
+
     /// Runs `body` only while the home screen or an allowlisted app is in
     /// front, and re-checks afterwards. One guarded call runs at a time.
     ///

@@ -387,4 +387,59 @@ final class GuardAndToolTests: XCTestCase {
         XCTAssertEqual(entries[0].time, h.clock.now)
         XCTAssertFalse(String(describing: entries).contains("private message"))
     }
+
+    // MARK: Keep awake
+
+    private func keepAwake(_ h: Harness) -> BridgeKeepAwake {
+        BridgeKeepAwake(raw: h.raw, guardian: h.guardian, clock: h.clock, interval: 20)
+    }
+
+    func testKeepAwakeTapsBottomEdgeWhenIdle() {
+        let h = Harness()
+        h.raw.foreground = whatsApp
+        let k = keepAwake(h)
+        XCTAssertEqual(k.pulseIfDue(), .notDue)
+        h.clock.uptime += 21
+        XCTAssertEqual(k.pulseIfDue(), .pulsed)
+        let tap = h.raw.calls.first { $0.method == "tap" }!.params
+        XCTAssertEqual(tap["y"] as? Double, 851)       // last point of an 852 pt screen
+        XCTAssertEqual(tap["x"] as? Double, 196.5)
+        XCTAssertEqual(tap["settle"] as? Bool, false)
+        XCTAssertEqual(k.pulseIfDue(), .notDue, "one pulse per interval")
+    }
+
+    func testKeepAwakeSkipsAfterRecentToolCall() {
+        let h = Harness()
+        let k = keepAwake(h)
+        h.clock.uptime += 15
+        k.noteActivity()
+        h.clock.uptime += 15
+        XCTAssertEqual(k.pulseIfDue(), .notDue)
+        XCTAssertEqual(h.raw.actionCalls, [])
+    }
+
+    func testKeepAwakeNeverTouchesABlockedOrLockedScreen() {
+        for setup in [{ (h: Harness) in h.raw.foreground = safari },
+                      { (h: Harness) in h.raw.screenLocked = true },
+                      { (h: Harness) in h.raw.springboardSource = MockRawAPI.appSwitcherSource },
+                      { (h: Harness) in h.raw.deviceInfoFails = true }] {
+            let h = Harness()
+            setup(h)
+            let k = keepAwake(h)
+            h.clock.uptime += 60
+            XCTAssertEqual(k.pulseIfDue(), .skipped)
+            XCTAssertEqual(h.raw.actionCalls, [])
+        }
+    }
+
+    func testKeepAwakeProbeDoesNotLogALockout() {
+        let h = Harness()
+        h.raw.foreground = safari
+        var lockouts = 0
+        h.guardian.onLockout = { lockouts += 1 }
+        let k = keepAwake(h)
+        h.clock.uptime += 60
+        _ = k.pulseIfDue()
+        XCTAssertEqual(lockouts, 0)
+    }
 }

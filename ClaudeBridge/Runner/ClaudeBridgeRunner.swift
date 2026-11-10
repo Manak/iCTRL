@@ -23,12 +23,24 @@ final class ClaudeBridgeRunner {
     private let lock = NSLock()
     let actionLog = BridgeActionLog()
     private(set) var guardian: BridgeGuard?
+    private var keepAwake: BridgeKeepAwake?
+    static let keepAwakeKey = "claudeBridge.keepAwake"
+
+    /// On by default while the bridge runs; set the key to false to let the
+    /// phone auto-lock as usual. `ICTRL_BRIDGE_KEEP_AWAKE=0` does the same
+    /// for one debug run.
+    static var keepAwakeEnabled: Bool {
+        if ProcessInfo.processInfo.environment["ICTRL_BRIDGE_KEEP_AWAKE"] == "0" { return false }
+        return UserDefaults.standard.object(forKey: keepAwakeKey) as? Bool ?? true
+    }
 
     /// Off unless switched on. With the bridge off, the runner behaves exactly
     /// like upstream iCTRL. `ICTRL_BRIDGE=1` in the Xcode scheme turns it on
     /// for a debug run without persisting anything.
     static var isEnabled: Bool {
         if ProcessInfo.processInfo.environment["ICTRL_BRIDGE"] == "1" { return true }
+        // Funnel mode needs the bridge, so it switches it on.
+        if ClaudeBridgeGate.funnelMode { return true }
         return UserDefaults.standard.bool(forKey: enabledKey)
     }
 
@@ -48,9 +60,11 @@ final class ClaudeBridgeRunner {
         let clock = BridgeSystemClock()
         let guardian = BridgeGuard(raw: raw, allowlist: allowlist)
         guardian.onLockout = { Self.log("🤖⛔️ Claude bridge locked out: non-allowlisted app in foreground") }
-        actionLog.onAppend = { entry in
+        let keepAwake = BridgeKeepAwake(raw: raw, guardian: guardian, clock: clock)
+        actionLog.onAppend = { [weak keepAwake] entry in
             // Tool name and status only. Never arguments or screen content.
             Self.log("🤖 MCP \(entry.tool) → \(entry.status.rawValue)")
+            keepAwake?.noteActivity()
         }
         let tools = BridgeTools(
             raw: raw, allowlist: allowlist, guardian: guardian,
@@ -78,6 +92,16 @@ final class ClaudeBridgeRunner {
             try server.start()
             http = server
             self.guardian = guardian
+            if Self.keepAwakeEnabled {
+                keepAwake.start()
+                self.keepAwake = keepAwake
+                Self.log("🤖 keep-awake on: the phone will not auto-lock while a permitted screen is in front")
+            }
+            // "Claude via Funnel": publish the listener through Tailscale.
+            // Without it the bridge stays reachable on this device only.
+            if ClaudeBridgeGate.funnelMode {
+                ClaudeBridgeTunnel.shared.start(targetPort: server.port) { Self.log($0) }
+            }
         } catch {
             Self.log("🤖🔴 Claude bridge failed to start: \(error)")
         }
@@ -85,6 +109,10 @@ final class ClaudeBridgeRunner {
 
     func stop() {
         lock.lock(); defer { lock.unlock() }
+        // Public side first, so nothing arrives for a listener that is gone.
+        ClaudeBridgeTunnel.shared.stop()
+        keepAwake?.stop()
+        keepAwake = nil
         http?.stop()
         http = nil
         guardian = nil
