@@ -13,8 +13,11 @@ import Foundation
 /// - skipped when a tool call already touched the screen recently;
 /// - never when the phone is already locked.
 final class BridgeKeepAwake {
-    /// Shorter than iOS's shortest auto-lock setting (30 s).
-    static let defaultInterval: TimeInterval = 20
+    /// iOS's shortest auto-lock setting is 30 s. A pulse must land well
+    /// inside that after the last touch, counting the timer's own tick, its
+    /// leeway and the foreground check that precedes the tap.
+    static let defaultInterval: TimeInterval = 12
+    static let tick: TimeInterval = 4
 
     private let raw: BridgeRawAPI
     private let guardian: BridgeGuard
@@ -41,8 +44,7 @@ final class BridgeKeepAwake {
         lock.lock(); defer { lock.unlock() }
         guard timer == nil else { return }
         let t = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
-        // Generous leeway lets the system batch the wake-up with other work.
-        t.schedule(deadline: .now() + interval, repeating: interval / 2, leeway: .seconds(2))
+        t.schedule(deadline: .now() + Self.tick, repeating: Self.tick, leeway: .milliseconds(500))
         t.setEventHandler { [weak self] in _ = self?.pulseIfDue() }
         t.resume()
         timer = t

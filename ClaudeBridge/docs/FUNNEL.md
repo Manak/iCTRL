@@ -122,7 +122,7 @@ After adding a new Swift file under `ClaudeBridge/`, regenerate the project
 ## Keep-awake while a session runs
 
 Added alongside this stage. A backgrounded runner cannot switch off the idle
-timer, so while the bridge runs it sends a tiny touch every 20 seconds of
+timer, so while the bridge runs it sends a tiny touch after about 12 seconds of
 inactivity: a tap on the last point of the bottom edge, under the home
 indicator. A tool call counts as activity and postpones it.
 
@@ -132,7 +132,9 @@ then. It is on by default with the bridge; set the `claudeBridge.keepAwake`
 default to false (or `ICTRL_BRIDGE_KEEP_AWAKE=0` for one run) to let the
 phone lock as usual.
 
-**Not yet verified on a phone**: whether a synthesized touch resets iOS's
-idle timer, and that the bottom-edge tap is harmless in WhatsApp, search and
-on the home screen. Cost to check too: each pulse reads the foreground first,
-which on the home screen takes about half a second.
+Tested on the phone (iOS 27.2, Auto-Lock at 30 seconds): with pulses about
+every 16 seconds the phone stayed unlocked on the home screen; without a
+timely pulse it locked at 29 seconds. A pulse first reads the foreground,
+which on the home screen takes about a second of work each time. Still to
+check: that the tap is harmless inside WhatsApp and in search over a long
+session, and the battery cost.
