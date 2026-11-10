@@ -63,7 +63,7 @@ class JSONRPCServer {
 
     init(port: UInt16 = 8200, localOnly: Bool = false) {
         self.port = port
-        self.localOnly = localOnly
+        self.localOnly = localOnly || ClaudeBridgeGate.forceLocalOnly  // CLAUDE-BRIDGE HOOK: raw API stays on loopback in Funnel mode
     }
 
     func start() throws {

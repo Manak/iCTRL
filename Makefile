@@ -267,3 +267,6 @@ help:
 .PHONY: Frameworks/IDevice.xcframework
 Frameworks/IDevice.xcframework:
 	@bash Scripts/fetch-idevice.sh
+
+# CLAUDE-BRIDGE HOOK: builds the Tailscale static library before `build`.
+-include ClaudeBridge/bridge.mk

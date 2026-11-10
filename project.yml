@@ -79,8 +79,13 @@ targets:
         buildPhase: resources
     dependencies:
       - target: iCTRL
+      # CLAUDE-BRIDGE HOOK: Tailscale (tsnet) static library, built by ClaudeBridge/go/build-ios.sh.
+      - framework: ClaudeBridge/build/ClaudeBridgeTS.xcframework
+        embed: false
     settings:
       base:
+        # CLAUDE-BRIDGE HOOK: system libraries the Go runtime links against.
+        OTHER_LDFLAGS: ["-lresolv", "-framework", "CoreFoundation", "-framework", "Security"]
         PRODUCT_BUNDLE_IDENTIFIER: "$(ICTRL_BUNDLE_PREFIX).ictrl.uitests"
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_STYLE: Automatic
