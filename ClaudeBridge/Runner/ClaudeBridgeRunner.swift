@@ -121,6 +121,9 @@ final class ClaudeBridgeRunner {
             try server.start()
             http = server
             self.guardian = guardian
+            if ProcessInfo.processInfo.environment["ICTRL_BRIDGE_DIAG"] == "1" {
+                ClaudeBridgeDiagnostics.start(raw: raw, log: Self.log)
+            }
             if Self.keepAwakeEnabled {
                 keepAwake.start()
                 self.keepAwake = keepAwake
@@ -322,5 +325,50 @@ final class ClaudeBridgeSecretStore: BridgeSecretSource {
         cached = secret
         loaded = true
         return false
+    }
+}
+
+// MARK: - Diagnostics
+
+/// Development aid, on only with `ICTRL_BRIDGE_DIAG=1`. Every two seconds it
+/// logs which app is in front and the element ids in SpringBoard's visible
+/// tree, when either changes. That is how the markers for the home screen,
+/// the app switcher and system overlays are found on a new iOS version.
+/// It logs identifiers only (letters, digits, `_ . : -`), never labels.
+enum ClaudeBridgeDiagnostics {
+    private static var timer: DispatchSourceTimer?
+    private static var last = ""
+
+    static func start(raw: BridgeRawAPI, log: @escaping (String) -> Void) {
+        let t = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        t.schedule(deadline: .now() + 2, repeating: 2)
+        t.setEventHandler {
+            var front = "?"
+            var locked = false
+            if case .success(let info) = raw.call("device_info", [:]), let system = info["system"] as? BridgeJSON {
+                front = system["foreground_app"] as? String ?? "unnamed"
+                locked = system["screen_locked"] as? Bool ?? false
+            }
+            var ids: [String] = []
+            var nodes = 0
+            if case .success(let page) = raw.call("page_source", ["bundle_id": BridgeGuard.springboard, "visible_only": true, "max_children": 50]),
+               let source = page["source"] as? String {
+                nodes = source.components(separatedBy: "\n").count
+                let pattern = try? NSRegularExpression(pattern: "id: '([A-Za-z0-9_.:\\-]{2,60})'")
+                let range = NSRange(source.startIndex..., in: source)
+                var seen = Set<String>()
+                pattern?.enumerateMatches(in: source, range: range) { match, _, _ in
+                    if let m = match, let r = Range(m.range(at: 1), in: source) { seen.insert(String(source[r])) }
+                }
+                ids = seen.sorted()
+            }
+            let line = "front=\(front) locked=\(locked) sb_nodes~\(nodes / 10 * 10) sb_ids=\(ids.prefix(40).joined(separator: ","))"
+            if line != last {
+                last = line
+                log("🤖🔬 \(line)")
+            }
+        }
+        t.resume()
+        timer = t
     }
 }

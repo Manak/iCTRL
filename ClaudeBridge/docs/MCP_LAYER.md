@@ -76,6 +76,9 @@ There is no tool that changes the allowlist.
 | Refusals | Non-allowlisted bundle id, foreign URL, edge swipes: refused before touching the phone |
 | Safari in front | Every guarded tool returns only the locked message; no app name, no image |
 | App switcher in front | Locked out (after the home-screen check was added) |
+| Control Centre, over the home screen or over WhatsApp | Locked out. iOS makes SpringBoard the front app while it is open, and the icon grid is not visible, so the home-screen check fails |
+| Notification Centre, over the home screen or over WhatsApp | Refused as `phone locked`. iOS reports the screen as locked while that sheet is down |
+| Keep-awake | With Auto-Lock at 30 s, the phone stayed unlocked for 19 idle minutes |
 | `go_home` | About 1.9 s from Safari or WhatsApp to a verified home screen |
 | Runner log | Tool name and status only; typed text and the secret do not appear |
 | Guard overhead | 40 to 100 ms per call in an app; about 450 ms more on the home screen |
@@ -95,13 +98,8 @@ What the phone test changed:
 
 ## Known gaps
 
-- **Notification Centre and Control Centre are not yet told apart from the
-  home screen**, and neither is an overlay pulled down over an allowlisted
-  app. Claude cannot open them (edge swipes are refused), but if the owner
-  does, the bridge would read them. Needs their element ids from a device.
 - **`go_home` from search does not reach the home screen** (see above). The
-  last change, stopping early there, is unit-tested but was not re-run on the
-  phone.
+  last change, stopping early there, takes 2.3 s on the phone.
 - **Typing in WhatsApp is slow**: 12 characters took 26 s inside iCTRL's own
   `type` call, and clearing with empty text timed out there. In search the
   same call took 1.3 s. Not a bridge issue, but worth tuning (`via`, `fast`).
@@ -134,3 +132,19 @@ the Mac, forward the port over USB (`iproxy 18220:8220`) and call
 `http://127.0.0.1:18220/<secret>/mcp`. The same run can be started from the
 command line with `xcodebuild test-without-building`, passing the variables
 with a `TEST_RUNNER_` prefix.
+
+## Finding markers on a new iOS version
+
+Run with `ICTRL_BRIDGE_DIAG=1`. Every two seconds the runner logs which app is
+in front, the lock flag and the element ids in SpringBoard's visible tree
+(identifiers only, never labels), whenever they change. Open each surface for
+a few seconds and read the log. On iOS 27.2 that showed:
+
+| Screen | Front app | Lock flag | Telling ids |
+|---|---|---|---|
+| Home screen | SpringBoard | false | `Home screen icons` |
+| App switcher | SpringBoard | false | `AppSwitcherContentView`, `SBSwitcherWindow:Main` |
+| Control Centre (anywhere) | SpringBoard | false | `cc-root-folder-view`, no icon grid |
+| Notification Centre (anywhere) | SpringBoard | **true** | `NotificationShortLookView` |
+| Pull-down search | `com.apple.campo` | false | |
+| An app | that app | false | |

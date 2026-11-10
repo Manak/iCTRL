@@ -135,6 +135,13 @@ final class GuardAndToolTests: XCTestCase {
         XCTAssertTrue(h.call("phone_status").firstText.contains("locked_out"))
     }
 
+    func testControlCentreIsNotTheHomeScreen() {
+        let h = Harness()
+        h.raw.springboardSource = "Other, id: 'Home screen icons'\nOther, id: 'cc-root-folder-view'"
+        XCTAssertEqual(h.call("screenshot").status, .lockedOut)
+        XCTAssertEqual(h.raw.actionCalls, [])
+    }
+
     func testSpringBoardWithoutIconGridIsNotHome() {
         let h = Harness()
         h.raw.springboardSource = "Window, id: 'SBCoverSheetWindow'"

@@ -58,7 +58,7 @@ final class BridgeGuard {
     static let lockedOutMessage =
         "locked: non-allowlisted app in foreground. Only go_home is available; call it to return to the home screen."
     static let phoneLockedMessage =
-        "phone locked: the phone must be unlocked by its owner before any action can run."
+        "phone locked: the lock screen or Notification Centre is showing. The phone's owner must unlock or dismiss it before any action can run."
     /// Sent when an action itself moved the phone somewhere it must not be.
     static let lockedAfterMessage =
         "locked: the action left a non-allowlisted app in the foreground. Nothing further was read or done. Call go_home."
@@ -137,7 +137,9 @@ final class BridgeGuard {
 
     /// Element ids, as they appear in iCTRL's page_source text on iOS 27.
     static let homeScreenMarker = "id: 'Home screen icons'"
-    static let notHomeMarkers = ["AppSwitcherContentView", "SBSwitcherWindow"]
+    /// App switcher and Control Centre. (On iOS 27 Control Centre already
+    /// hides the icon grid; its marker is here as a second line of defence.)
+    static let notHomeMarkers = ["AppSwitcherContentView", "SBSwitcherWindow", "cc-root-folder-view"]
 
     static func isHomeScreen(springboardSource source: String) -> Bool {
         guard source.contains(homeScreenMarker) else { return false }
