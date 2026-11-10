@@ -56,6 +56,16 @@ final class AuthTests: XCTestCase {
         XCTAssertTrue(auth.authorize(request("/\(next)/mcp")))
     }
 
+    func testConnectorURLMatchesWhatTheAuthenticatorAccepts() {
+        let secret = BridgeSecret.generate()
+        let url = URL(string: BridgeConnectorURL.make(host: "ictrl-phone.tail1234.ts.net", secret: secret))!
+        XCTAssertEqual(url.scheme, "https")
+        XCTAssertEqual(url.host, "ictrl-phone.tail1234.ts.net")
+        let auth = BridgePathSecretAuthenticator(secrets: FixedSecret(currentSecret: secret))
+        XCTAssertTrue(auth.authorize(request(url.path)))
+        XCTAssertFalse(BridgeConnectorURL.masked(host: "h.ts.net").contains(secret))
+    }
+
     func testPathAndBearer() {
         let token = "t0ken-t0ken-t0ken-t0ken-t0ken-t0ken-t0ken"
         let auth = BridgePathAndBearerAuthenticator(

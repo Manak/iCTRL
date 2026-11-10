@@ -84,3 +84,16 @@ struct BridgePathAndBearerAuthenticator: BridgeAuthenticator {
         return pathOK && tokenOK
     }
 }
+
+/// The address the user gives to Claude as a custom connector.
+enum BridgeConnectorURL {
+    /// Full URL, secret included. Hand it only to the phone's owner.
+    static func make(host: String, secret: String) -> String {
+        "https://\(host)/\(secret)/mcp"
+    }
+
+    /// Safe to show, log or screenshot: the secret is replaced by dots.
+    static func masked(host: String) -> String {
+        "https://\(host)/••••••••/mcp"
+    }
+}

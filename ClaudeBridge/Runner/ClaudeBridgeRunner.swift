@@ -49,10 +49,39 @@ final class ClaudeBridgeRunner {
         return http != nil
     }
 
-    /// Starts the MCP listener on 127.0.0.1. Does nothing unless enabled.
+    /// Kept so the mode can be switched while the runner is running.
+    private var rpc: ClaudeBridgeRPC?
+
+    /// Called once by the runner when its own server is up. Starts the MCP
+    /// listener on 127.0.0.1 if the bridge is enabled; otherwise only
+    /// remembers how to reach the raw API, for a later `setFunnelMode`.
     func start(rpc: @escaping ClaudeBridgeRPC) {
-        guard Self.isEnabled else { return }
         lock.lock(); defer { lock.unlock() }
+        self.rpc = rpc
+        startLocked()
+    }
+
+    /// Switches "Claude via Funnel" on or off, now and for future starts.
+    func setFunnelMode(_ on: Bool) {
+        UserDefaults.standard.set(on, forKey: ClaudeBridgeGate.funnelKey)
+        lock.lock()
+        stopLocked()
+        let rpc = self.rpc
+        startLocked()
+        lock.unlock()
+        if on, let rpc = rpc {
+            // The raw API must be loopback-only from now on. Asking for
+            // remote access off rebuilds its listener if it was on, and the
+            // rebuilt listener is pinned to loopback by ClaudeBridgeGate.
+            rpc("config", [
+                "allow_remote_access": .bool(false),
+                JSONRPCServer.peerSourceParam: .string("local"),
+            ]) { _, _ in }
+        }
+    }
+
+    private func startLocked() {
+        guard Self.isEnabled, let rpc = rpc else { return }
         guard http == nil else { return }
 
         let raw = ClaudeBridgeRawAPI(rpc: rpc)
@@ -109,6 +138,10 @@ final class ClaudeBridgeRunner {
 
     func stop() {
         lock.lock(); defer { lock.unlock() }
+        stopLocked()
+    }
+
+    private func stopLocked() {
         // Public side first, so nothing arrives for a listener that is gone.
         ClaudeBridgeTunnel.shared.stop()
         keepAwake?.stop()

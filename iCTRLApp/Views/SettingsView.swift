@@ -96,6 +96,8 @@ struct SettingsView: View {
 
             deviceSection
 
+            ClaudeBridgeSettingsLink()  // CLAUDE-BRIDGE HOOK
+
             Section {
                 HStack {
                     Text(L10n.t(.versionLabel))

@@ -27,6 +27,14 @@ final class ClaudeBridgeTunnel {
     static let shared = ClaudeBridgeTunnel()
     static let hostnameKey = "claudeBridge.hostname"
     static let defaultHostname = "ictrl-phone"
+    static let lastHostKey = "claudeBridge.lastHost"
+
+    /// Public host name from the last time Funnel was live. It only changes
+    /// if the device is renamed or the tailnet's domain changes.
+    static var lastKnownHost: String? {
+        let host = UserDefaults.standard.string(forKey: lastHostKey) ?? ""
+        return host.isEmpty ? nil : host
+    }
 
     private let lock = NSLock()
     private var started = false
@@ -117,6 +125,8 @@ final class ClaudeBridgeTunnel {
             switch now.state {
             case "running":
                 log("🤖🌐 Funnel live at https://\(now.host ?? "?")/…/mcp")
+                // Remembered so the companion can show the URL while stopped.
+                if let host = now.host { UserDefaults.standard.set(host, forKey: Self.lastHostKey) }
                 // Settled: a slow heartbeat is enough from here on.
                 timer.schedule(deadline: .now() + 60, repeating: 60, leeway: .seconds(10))
             case "error", "needs_login":

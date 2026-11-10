@@ -1291,6 +1291,8 @@ final class iCTRLUITests: XCTestCase, UNUserNotificationCenterDelegate {
                 let work = {
                     if method == "config" {
                         result = self.handleConfig(params)
+                    } else if method == ClaudeBridgeAdmin.method {  // CLAUDE-BRIDGE HOOK: companion-only bridge settings
+                        result = ClaudeBridgeAdmin.handle(params)
                     } else if let handler = self.actionHandler {
                         let reason = ObjCException.catching {
                             result = handler.dispatch(method: method, params: params)
