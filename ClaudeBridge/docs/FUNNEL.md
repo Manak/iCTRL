@@ -104,6 +104,28 @@ Tests for the proxy:
 cd ClaudeBridge/go && go test ./...
 ```
 
+### Installing on the phone
+
+Use the packaged IPAs, not the raw build products:
+
+```bash
+make ipa
+```
+
+```bash
+xcrun devicectl device install app --device <udid> iCTRLUITests-Runner.ipa
+```
+
+```bash
+xcrun devicectl device install app --device <udid> iCTRL.ipa
+```
+
+`make ipa` is what gives the runner its `ictrl://` URL scheme and icon.
+A runner started from the Mac with `xcodebuild test-without-building` has
+neither, so the companion's Start Server button fails with "Couldn't open the
+runner", and that runner dies when the Mac's test session ends. That route is
+only for development runs that need `TEST_RUNNER_…` environment variables.
+
 After adding a new Swift file under `ClaudeBridge/`, regenerate the project
 (`xcodegen generate`); `make` only does so when `project.yml` changes.
 
