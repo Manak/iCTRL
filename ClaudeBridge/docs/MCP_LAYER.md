@@ -55,6 +55,28 @@ The server's instructions and the tool descriptions steer towards:
 - **Acting by label** with `tap_element`, checking with `check_element`, and
   chaining with `run_steps`.
 
+## read_ui never cuts a page off
+
+Three limits used to truncate long pages; all three are dealt with:
+
+| Limit | Was | Now |
+|---|---|---|
+| Elements the device returns | iCTRL's default of 2000 (the bridge never asked for more), hard cap 4000 | The bridge asks for 10,000, and iCTRL's cap is raised to match (hook in `ActionHandler.swift`) |
+| Children per container | 400 | 1000 |
+| Characters in one result | 60,000, then cut with "[truncated]" | 60,000 per result, then a note with `start_at` to fetch the rest. Nothing is dropped |
+
+Unnamed containers (`Other`, `Window` or `Group` with no label, value,
+identifier or state) are left out of the text, and indentation is recomputed.
+They carry no information and are a quarter or more of a real page.
+
+Measured on the phone, Grab's Subway menu: 5,327 elements, 1,332 of them
+unnamed containers, leaving 3,995 lines returned over six results (about
+307,000 characters in all). The old limits stopped at 2,000 elements and
+60,000 characters.
+
+If a page really has more than 10,000 elements, the result says the end is
+missing and to scroll further and read again.
+
 ## A new action replaces the one in progress
 
 Action calls are not queued. When a new action call arrives (`tap`,

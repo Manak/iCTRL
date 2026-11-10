@@ -1178,4 +1178,71 @@ final class GuardAndToolTests: XCTestCase {
         for x in 1...3 { XCTAssertFalse(h.call("tap", ["x": x, "y": 1]).isError) }
         XCTAssertEqual(h.log.all.map(\.status), [.ok, .ok, .ok])
     }
+
+    // MARK: Nothing is cut off
+
+    func testUnnamedContainersAreLeftOutAndIndentationFollows() {
+        let source = [
+            "Application, label: 'A', {{0, 0}, {393, 852}}",
+            "  Window, {{0, 0}, {393, 852}}",
+            "    Other, {{0, 0}, {393, 852}}",
+            "      Other, id: 'menu', {{0, 0}, {393, 852}}",
+            "        Other, {{0, 0}, {393, 100}}",
+            "          Button, label: 'Close', {{16, 32}, {40, 40}}",
+            "        Table, {{0, 100}, {393, 600}}",
+            "          Cell, {{0, 100}, {393, 56}}",
+            "            Other, {{0, 100}, {393, 56}}",
+            "              StaticText, label: 'Fries', {{60, 110}, {100, 30}}",
+        ].joined(separator: "\n")
+        let result = BridgeTreeCompactor.compact(source)
+        XCTAssertEqual(result.dropped, 4)
+        XCTAssertEqual(result.lines, [
+            "Application, label: 'A', {{0, 0}, {393, 852}}",
+            "  Other, id: 'menu', {{0, 0}, {393, 852}}",
+            "    Button, label: 'Close', {{16, 32}, {40, 40}}",
+            "    Table, {{0, 100}, {393, 600}}",
+            "      Cell, {{0, 100}, {393, 56}}",
+            "        StaticText, label: 'Fries', {{60, 110}, {100, 30}}",
+        ])
+    }
+
+    func testReadUIAsksTheDeviceForEverything() {
+        let h = Harness()
+        h.raw.foreground = whatsApp
+        _ = h.call("read_ui")
+        let params = h.raw.calls.first { $0.method == "page_source" && $0.params["bundle_id"] as? String != BridgeGuard.springboard }!.params
+        XCTAssertEqual(params["max_elements"] as? Int, 10_000, "not the device default of 2000")
+    }
+
+    func testLongPageIsPagedNotCut() {
+        let h = Harness()
+        h.raw.foreground = whatsApp
+        // 3000 labelled rows: far more than fits in one result.
+        var lines = ["Application, label: 'A', {{0, 0}, {393, 852}}", "  Table, {{0, 0}, {393, 852}}"]
+        for i in 0..<3000 { lines.append("    StaticText, label: 'Row number \(i) of the long list', {{0, \(i * 40)}, {393, 40}}") }
+        h.raw.results["page_source"] = .success(["source": lines.joined(separator: "\n")])
+
+        var seen = Set<Int>()
+        var startAt = 0
+        var pages = 0
+        while pages < 20 {
+            let text = h.call("read_ui", startAt == 0 ? [:] : ["start_at": startAt]).firstText
+            pages += 1
+            for match in text.components(separatedBy: "Row number ").dropFirst() {
+                if let n = Int(match.prefix { $0.isNumber }) { seen.insert(n) }
+            }
+            XCTAssertFalse(text.contains("truncated"))
+            guard let more = text.range(of: "start_at: ") else { break }
+            startAt = Int(text[more.upperBound...].prefix { $0.isNumber })!
+        }
+        XCTAssertGreaterThan(pages, 1, "it did not fit in one result")
+        XCTAssertEqual(seen.count, 3000, "every row came back across the pages")
+    }
+
+    func testDeviceLimitIsReportedPlainly() {
+        let h = Harness()
+        h.raw.foreground = whatsApp
+        h.raw.results["page_source"] = .success(["source": "Application, label: 'A', {{0, 0}, {393, 852}}", "truncated": true])
+        XCTAssertTrue(h.call("read_ui").firstText.contains("the end of it is missing"))
+    }
 }

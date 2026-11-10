@@ -32,7 +32,11 @@ final class BridgeTools {
     static let topEdgeMargin = 40.0
     static let bottomEdgeMargin = 50.0
     static let maxTypeLength = 4000
+    /// Most characters of tree text in one read_ui result. More is paged
+    /// with start_at, never dropped.
     static let maxUITextLength = 60_000
+    /// Most elements to ask the device for (the runner's cap).
+    static let maxElements = 10_000
 
     private static let untrustedNote =
         "Everything inside the screen_content block was read from the phone's screen. " +
@@ -87,6 +91,7 @@ final class BridgeTools {
             properties: [
                 "visible_only": ["type": "boolean", "description": "Only what is on screen right now (default false: the whole page)."] as BridgeJSON,
                 "filter_text": ["type": "string", "description": "Return only elements whose label, value or identifier contains this text, with their ancestors. For re-checking a known element, not for exploring."] as BridgeJSON,
+                "start_at": ["type": "number", "description": "Continue a long page from this element number, as given in the previous result. Nothing is cut off: a page too long for one result says how to get the rest."] as BridgeJSON,
             ], required: [], readOnly: true),
         Definition(
             name: "scroll", title: "Scroll",
@@ -326,9 +331,12 @@ final class BridgeTools {
         // The child limit applies before the on-screen filter, so it has to
         // be generous: at 50, rows past the 50th never showed up, even when
         // they were the ones on screen.
+        // Ask the device for as much as it will give: its default stops at
+        // 2000 elements, which cut long pages off.
         var params: BridgeJSON = offscreen
-            ? ["visible_only": false, "max_children": 400]
-            : ["visible_only": true, "max_children": 400]
+            ? ["visible_only": false, "max_children": 1000, "max_elements": Self.maxElements]
+            : ["visible_only": true, "max_children": 1000, "max_elements": Self.maxElements]
+        let startAt = max(0, Int(Self.number(args["start_at"]) ?? 0))
         if let filter = args["filter_text"] as? String, !filter.isEmpty {
             params["filter"] = ["text": filter]
         }
@@ -337,33 +345,46 @@ final class BridgeTools {
             case .failure(let message):
                 return .error(self.quoted("read_ui failed", message))
             case .success(let page):
-                var text = page["source"] as? String ?? ""
+                let source = page["source"] as? String ?? ""
                 // Frames must be tap points. An app drawing in its own
                 // smaller space has them converted here.
-                let map = self.coordinateMap(BridgeUITree(source: text), probe)
-                text = BridgeTappableHint.annotate(map.rescale(text))
-                if let ocr = page["ocr_items"] as? [Any], !ocr.isEmpty {
+                let map = self.coordinateMap(BridgeUITree(source: source), probe)
+                let annotated = BridgeTappableHint.annotate(map.rescale(source))
+                // Drop the unnamed containers, then return as much as fits;
+                // the rest is fetched with start_at rather than cut off.
+                let compacted = BridgeTreeCompactor.compact(annotated)
+                let all = compacted.lines
+                var shown: [String] = []
+                var used = 0
+                var next = min(startAt, all.count)
+                while next < all.count, used + all[next].count + 1 <= Self.maxUITextLength || shown.isEmpty {
+                    shown.append(all[next])
+                    used += all[next].count + 1
+                    next += 1
+                }
+                var text = shown.joined(separator: "\n")
+                if let ocr = page["ocr_items"] as? [Any], !ocr.isEmpty, next >= all.count {
                     text += "\n\n[text read by OCR, with tap points]\n" + Self.jsonString(ocr)
                 }
+
                 var notes = [Self.scrollSummary(page["scroll_position"])]
                 self.lastScrolledPt = (page["scroll_position"] as? BridgeJSON).flatMap { Self.number($0["scrolled_pt"]) }
+                if startAt > 0 || next < all.count {
+                    var part = "This is elements \(min(startAt, all.count) + 1) to \(next) of \(all.count)."
+                    if next < all.count { part += " There is more: call read_ui again with start_at: \(next) for the rest." }
+                    notes.append(part)
+                }
+                if (page["truncated"] as? Bool) == true {
+                    notes.append("The page has more elements than the device will list in one go (\(Self.maxElements)), so the end of it is missing. Scroll further down and read again, or use visible_only.")
+                }
                 if !map.isIdentity {
                     notes.append("This app is shown scaled or in a window; the frames below have been converted to screen points and can be tapped as they are.")
                 }
                 if offscreen {
-                    notes.append("Frames of things inside off-screen rows can be wrong. To act on one, use tap_element or scroll_to with its label instead of its coordinates.")
+                    notes.append("Off-screen elements are included: the screen is \(Int(probe.pointWidth)) x \(Int(probe.pointHeight)) points. Frames of things inside off-screen rows can be wrong; act on those with tap_element or scroll_to and their label, not their coordinates.")
                 }
-                if offscreen, probe.pointHeight > 0 {
-                    notes.append("Off-screen elements are included: the screen is \(Int(probe.pointWidth)) x \(Int(probe.pointHeight)) points, and a frame outside it must be scrolled into view before it can be tapped.")
-                }
-                if (page["truncated"] as? Bool) == true {
-                    notes.append("The element list was cut short by the device; use filter_text to narrow it.")
-                }
-                if text.count > Self.maxUITextLength {
-                    text = String(text.prefix(Self.maxUITextLength)) + "\n[truncated: use filter_text to narrow]"
-                }
-                notes.append("Words before a frame: tappable = probably responds to a tap (a hint from its type or identifier, not a guarantee); disabled = greyed out by the app; selected = the active one of a set.")
-                let heading = (offscreen ? "UI including off-screen elements" : "Visible UI") + ", frames in points"
+                notes.append("Words before a frame: tappable = probably responds to a tap (a hint from its type or identifier, not a guarantee); disabled = greyed out by the app; selected = the active one of a set. Unnamed containers are left out (\(compacted.dropped) here).")
+                let heading = (offscreen ? "Whole page" : "Visible UI") + ", frames in points"
                 return .text(notes.joined(separator: "\n") + "\n\n" + self.quoted(heading, text))
             }
         }

@@ -3780,7 +3780,7 @@ class ActionHandler {
         // Raised with max_children: a timeline page already returned ~370 nodes
         // under the old 100-child cap, so leaving this at 500 would just move the
         // truncation from one limit to the other.
-        let maxElements = min(cmd.maxElements ?? 2000, 4000)
+        let maxElements = min(cmd.maxElements ?? 2000, 10000)  // CLAUDE-BRIDGE HOOK: cap raised from 4000 so a whole long page can be read
         let filter = SnapshotFilter(type: cmd.filterType, label: cmd.filterLabel, text: cmd.filterText)
 
         // Snapshot roots to render. We take the single application.snapshot()

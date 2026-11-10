@@ -203,6 +203,54 @@ enum BridgeTappableHint {
     }
 }
 
+/// Removes the lines of a UI tree that carry no information.
+///
+/// Apps nest their content in many unnamed containers. On a real page well
+/// over half the lines are `Other, {{…}}` with no label, value or identifier:
+/// they say nothing to a reader and they are what makes a page too long to
+/// return in one piece. Containers that mean something (lists, cells, bars,
+/// anything named or with a state) are kept, and indentation is recomputed
+/// from the lines that remain.
+enum BridgeTreeCompactor {
+    static let structuralTypes: Set<String> = ["Other", "Window", "Group", "Any"]
+
+    static func keeps(_ node: BridgeUITree.Node) -> Bool {
+        if node.parent == nil { return true }
+        if !structuralTypes.contains(node.type) { return true }
+        if !(node.label ?? "").isEmpty || !(node.value ?? "").isEmpty || !(node.identifier ?? "").isEmpty { return true }
+        return node.selected || node.disabled
+    }
+
+    /// Returns the kept lines, re-indented, and how many were dropped.
+    static func compact(_ source: String) -> (lines: [String], dropped: Int) {
+        let tree = BridgeUITree(source: source)
+        var depth: [Int] = []          // depth among kept lines, per node
+        var kept: [Bool] = []
+        for node in tree.nodes {
+            let keep = keeps(node)
+            let parentDepth = node.parent.map { depth[$0] + (kept[$0] ? 1 : 0) } ?? 0
+            depth.append(parentDepth)
+            kept.append(keep)
+        }
+        var out: [String] = []
+        var dropped = 0
+        var index = 0
+        for line in source.components(separatedBy: "\n") {
+            guard line.range(of: ", {{", options: .backwards) != nil, line.hasSuffix("}}"), index < tree.nodes.count else {
+                if !line.isEmpty { out.append(line) }
+                continue
+            }
+            if kept[index] {
+                out.append(String(repeating: "  ", count: depth[index]) + line.drop { $0 == " " })
+            } else {
+                dropped += 1
+            }
+            index += 1
+        }
+        return (out, dropped)
+    }
+}
+
 /// Converts between an app's own coordinate space and screen points.
 ///
 /// Most apps fill the screen and need no conversion. An app shown in a window,
