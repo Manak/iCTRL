@@ -108,6 +108,16 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(h.raw.calls.count, 0)
     }
 
+    func testOnlyAuthenticRequestsCountAsActivity() {
+        var seen = 0
+        server.onAuthenticRequest = { seen += 1 }
+        _ = server.handle(request("/wrong/mcp", json: ["jsonrpc": "2.0", "id": 1, "method": "ping"]))
+        XCTAssertEqual(seen, 0)
+        _ = rpc("ping")
+        _ = rpc("tools/list")
+        XCTAssertEqual(seen, 2)
+    }
+
     func testInitializeNegotiatesVersion() {
         let r = decode(rpc("initialize", ["protocolVersion": "2025-03-26", "capabilities": [:], "clientInfo": ["name": "t", "version": "1"]]))
         let result = r["result"] as! BridgeJSON

@@ -1,4 +1,5 @@
 import Foundation
+import UserNotifications
 
 /// Phone-side administration of the bridge, for the companion app.
 ///
@@ -17,6 +18,8 @@ import Foundation
 /// | rotate_secret   |                 | url (new secret; old one is dead)       |
 /// | set_auth_key    | auth_key        | status                                  |
 /// | action_log      |                 | entries: time, tool, status             |
+/// | end_session     |                 | stops bridge, raw API and the runner    |
+/// | live_activity   | showing: bool   | status; withholds the status notification |
 enum ClaudeBridgeAdmin {
     static let method = "claude_bridge"
 
@@ -57,6 +60,18 @@ enum ClaudeBridgeAdmin {
             iCTRLUITests.logBuffer.append(key.isEmpty ? "🤖🔑 Tailscale auth key cleared" : "🤖🔑 Tailscale auth key stored")
             return (status(), nil)
 
+        case "end_session":
+            iCTRLUITests.logBuffer.append("🤖🛑 Session ended from the phone")
+            ClaudeBridgeRunner.shared.endSession()
+            return (["stopping": .bool(true)], nil)
+
+        case "live_activity":
+            // The companion reports whether its Live Activity is on screen.
+            let showing = params["showing"]?.boolValue ?? false
+            ClaudeBridgeRunner.shared.statusNotificationSuppressed = showing
+            if showing { ClaudeBridgeNotifications.removeStatusNotification() }
+            return (status(), nil)
+
         case "action_log":
             let iso = ISO8601DateFormatter()
             let entries: [JSONValue] = ClaudeBridgeRunner.shared.actionLog.all.suffix(200).map {
@@ -89,6 +104,14 @@ enum ClaudeBridgeAdmin {
                 .object(["bundle_id": .string($0.bundleID), "name": .string($0.name), "read_only": .bool($0.readOnly)])
             }),
         ]
+        if let started = runner.sessionStarted {
+            out["session_started"] = .double(started.timeIntervalSince1970)
+        }
+        out["idle_limit_minutes"] = .double(ClaudeBridgeRunner.idleLimit / 60)
+        if let idle = runner.idle, let remaining = idle.remaining {
+            out["idle_seconds"] = .double(idle.idleFor)
+            out["ends_at"] = .double(Date().timeIntervalSince1970 + remaining)
+        }
         if let host = tunnel.host ?? ClaudeBridgeTunnel.lastKnownHost { out["host"] = .string(host) }
         if let error = tunnel.error { out["tunnel_error"] = .string(error) }
         return out
@@ -102,5 +125,17 @@ enum ClaudeBridgeAdmin {
             return (nil, .serverError("claude_bridge: the public host name is not known yet; start a session in Funnel mode and wait until it is live"))
         }
         return (["url": .string(BridgeConnectorURL.make(host: host, secret: secret)), "host": .string(host)], nil)
+    }
+}
+
+/// Runner-side notification housekeeping for the bridge.
+enum ClaudeBridgeNotifications {
+    /// Identifier of iCTRL's always-present "server ready" notification.
+    static let statusNotificationID = "ictrl.server.ready"
+
+    static func removeStatusNotification() {
+        let center = UNUserNotificationCenter.current()
+        center.removeDeliveredNotifications(withIdentifiers: [statusNotificationID])
+        center.removePendingNotificationRequests(withIdentifiers: [statusNotificationID])
     }
 }

@@ -449,4 +449,44 @@ final class GuardAndToolTests: XCTestCase {
         _ = k.pulseIfDue()
         XCTAssertEqual(lockouts, 0)
     }
+
+    // MARK: Idle shutdown
+
+    func testIdleShutdownFiresOnceAfterTheLimit() {
+        let clock = TestClock()
+        let idle = BridgeIdleShutdown(limit: 1800, clock: clock)
+        var fired = 0
+        idle.onExpire = { fired += 1 }
+        clock.uptime += 1799
+        XCTAssertFalse(idle.check())
+        XCTAssertEqual(idle.remaining, 1)
+        clock.uptime += 2
+        XCTAssertTrue(idle.check())
+        XCTAssertFalse(idle.check(), "fires once")
+        XCTAssertEqual(fired, 1)
+    }
+
+    func testActivityPostponesIdleShutdown() {
+        let clock = TestClock()
+        let idle = BridgeIdleShutdown(limit: 1800, clock: clock)
+        var fired = 0
+        idle.onExpire = { fired += 1 }
+        clock.uptime += 1700
+        idle.noteActivity()
+        clock.uptime += 1700
+        XCTAssertFalse(idle.check())
+        XCTAssertEqual(idle.idleFor, 1700)
+        clock.uptime += 200
+        XCTAssertTrue(idle.check())
+        XCTAssertEqual(fired, 1)
+    }
+
+    func testZeroLimitNeverShutsDown() {
+        let clock = TestClock()
+        let idle = BridgeIdleShutdown(limit: 0, clock: clock)
+        idle.onExpire = { XCTFail("must not fire") }
+        clock.uptime += 1_000_000
+        XCTAssertFalse(idle.check())
+        XCTAssertNil(idle.remaining)
+    }
 }

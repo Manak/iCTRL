@@ -24,6 +24,35 @@ final class ClaudeBridgeRunner {
     let actionLog = BridgeActionLog()
     private(set) var guardian: BridgeGuard?
     private var keepAwake: BridgeKeepAwake?
+    private(set) var idle: BridgeIdleShutdown?
+    private(set) var sessionStarted: Date?
+    static let idleMinutesKey = "claudeBridge.idleMinutes"
+
+    /// True once the companion says its Live Activity is showing. The
+    /// runner's own "server ready" notification is then redundant and is
+    /// withheld (see the hook in `postStatusNotification`).
+    var statusNotificationSuppressed = false
+
+    /// Minutes without a request from Claude before the session ends.
+    /// Default 30; 0 means never.
+    static var idleLimit: TimeInterval {
+        if let minutes = UserDefaults.standard.object(forKey: idleMinutesKey) as? Double {
+            return max(0, minutes) * 60
+        }
+        return BridgeIdleShutdown.defaultLimit
+    }
+
+    /// Stops everything: the public address, the bridge, the raw API and the
+    /// runner process itself. Uses iCTRL's own stop path, so the run loop
+    /// exits and the bridge is torn down by the hook that follows it.
+    func endSession() {
+        lock.lock(); let rpc = self.rpc; lock.unlock()
+        guard let rpc = rpc else { return }
+        rpc("config", [
+            "stop_server": .bool(true),
+            JSONRPCServer.peerSourceParam: .string("local"),
+        ]) { _, _ in }
+    }
     static let keepAwakeKey = "claudeBridge.keepAwake"
 
     /// On by default while the bridge runs; set the key to false to let the
@@ -113,6 +142,14 @@ final class ClaudeBridgeRunner {
         secrets.ensureSecret()
         let mcp = BridgeMCPServer(auth: BridgePathSecretAuthenticator(secrets: secrets), tools: tools)
 
+        // End the whole session when Claude has been quiet for too long.
+        let idle = BridgeIdleShutdown(limit: Self.idleLimit, clock: clock)
+        mcp.onAuthenticRequest = { [weak idle] in idle?.noteActivity() }
+        idle.onExpire = { [weak self] in
+            Self.log("🤖💤 No request from Claude for \(Int(Self.idleLimit / 60)) min: ending the session")
+            self?.endSession()
+        }
+
         let saved = UserDefaults.standard.integer(forKey: Self.portKey)
         let port = (saved > 1024 && saved <= 65535) ? UInt16(saved) : Self.defaultPort
         let server = BridgeHTTPServer(port: port) { mcp.handle($0) }
@@ -121,6 +158,9 @@ final class ClaudeBridgeRunner {
             try server.start()
             http = server
             self.guardian = guardian
+            self.idle = idle
+            sessionStarted = Date()
+            idle.start()
             if ProcessInfo.processInfo.environment["ICTRL_BRIDGE_DIAG"] == "1" {
                 ClaudeBridgeDiagnostics.start(raw: raw, log: Self.log)
             }
@@ -147,6 +187,10 @@ final class ClaudeBridgeRunner {
     private func stopLocked() {
         // Public side first, so nothing arrives for a listener that is gone.
         ClaudeBridgeTunnel.shared.stop()
+        idle?.stop()
+        idle = nil
+        sessionStarted = nil
+        statusNotificationSuppressed = false
         keepAwake?.stop()
         keepAwake = nil
         http?.stop()

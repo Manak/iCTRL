@@ -21,8 +21,12 @@ Rules for this list:
 | `iCTRLUITests/iCTRLUITests.swift` | In `testStartServer`, after `safetyTimer.invalidate()`: `ClaudeBridgeRunner.shared.stop()`. | Stops the bridge on every path that ends the run loop. |
 | `iCTRLUITests/iCTRLUITests.swift` | In `tearDownWithError`, after the log line: `ClaudeBridgeRunner.shared.stop()`. | Stops the bridge if XCTest tears the test down directly. |
 | `iCTRLUITests/iCTRLUITests.swift` | In the `onRPCRequest` closure, between the `config` branch and the `actionHandler` branch: `else if method == ClaudeBridgeAdmin.method { result = ClaudeBridgeAdmin.handle(params) }`. | Routes the companion's `claude_bridge` method (mode, address, rotation, auth key) to the bridge. |
+| `iCTRLUITests/iCTRLUITests.swift` | First line of `postStatusNotification`: `if ClaudeBridgeRunner.shared.statusNotificationSuppressed { return }`. | Withholds the "server ready" notification while the companion's Live Activity is showing. |
 | `iCTRLApp/Views/SettingsView.swift` | In `body`, after `deviceSection`: `ClaudeBridgeSettingsLink()`. | The Claude Bridge row in the companion's settings. |
-| `project.yml` | Under `iCTRL` → `sources`, after `- path: iCTRLKit`: source path `ClaudeBridge/App`. | Compiles the bridge screens into the companion app. |
+| `project.yml` | Under `iCTRL` → `sources`, after `- path: iCTRLKit`: source paths `ClaudeBridge/App` and `ClaudeBridge/Shared`. | Compiles the bridge screens, Shortcuts actions and Live Activity model into the companion app. |
+| `project.yml` | Under `iCTRL` → `dependencies`: `- target: iCTRLBridgeWidget`. | Embeds the widget extension in the companion app. |
+| `project.yml` | Under `iCTRL` → `settings` → `base`, first entry: `INFOPLIST_KEY_NSSupportsLiveActivities: YES`. | Allows the companion to show a Live Activity. |
+| `project.yml` | New target `iCTRLBridgeWidget` (app-extension), placed just before `schemes:`. | The widget extension that draws the Live Activity. |
 | `project.yml` | Under `iCTRLUITests` → `sources`, after `- path: iCTRLKit`: two source paths, `ClaudeBridge/Core` and `ClaudeBridge/Runner`. | Compiles the bridge into the runner. |
 | `project.yml` | Under `iCTRLUITests` → `dependencies`, after `- target: iCTRL`: the static framework `ClaudeBridge/build/ClaudeBridgeTS.xcframework` with `embed: false`. | Links the Tailscale (tsnet) library into the runner. |
 | `project.yml` | Under `iCTRLUITests` → `settings` → `base`, first entry: `OTHER_LDFLAGS` with `-lresolv`, CoreFoundation and Security. | System libraries the Go runtime needs. |
@@ -42,7 +46,10 @@ Rules for this list:
 | `ClaudeBridge/docs/MCP_LAYER.md` | Stage 2: what the MCP layer does and how to try it. |
 | `ClaudeBridge/Core/` | The bridge itself: MCP protocol, tools, allowlist guard, auth, loopback HTTP listener. Foundation and Network only. |
 | `ClaudeBridge/Runner/` | Glue to iCTRL's types: RPC adapter, keychain secrets, allowlist storage, Tailscale tunnel wrapper. |
-| `ClaudeBridge/App/` | Companion-app screens: Funnel switch, masked address with Copy and Rotate, auth key entry. |
+| `ClaudeBridge/App/` | Companion-app code: the Claude Bridge screen, session start/stop, Shortcuts actions. |
+| `ClaudeBridge/Shared/` | Live Activity model and the Stop intent, compiled into both the companion and its widget extension. |
+| `ClaudeBridge/Widget/` | The widget extension: Live Activity views and its Info.plist. |
+| `ClaudeBridge/docs/SESSION.md` | Shortcuts actions, Live Activity, idle auto-off. |
 | `ClaudeBridge/docs/SECRET.md` | Stage 4: the URL secret, the check, rotation, and where the secret can appear. |
 | `ClaudeBridge/go/` | The Tailscale side: tsnet + Funnel reverse proxy, built as a static iOS library by `build-ios.sh`. |
 | `ClaudeBridge/bridge.mk` | Makefile rules for the Go library, included from the upstream Makefile. |

@@ -1959,6 +1959,7 @@ final class iCTRLUITests: XCTestCase, UNUserNotificationCenterDelegate {
     /// While advertised nearby, the name nearby clients see is listed too.
     private func postStatusNotification(title: String = L10n.t(.serverReadyTitle), detail: String,
                                         silent: Bool = false) {
+        if ClaudeBridgeRunner.shared.statusNotificationSuppressed { return }  // CLAUDE-BRIDGE HOOK: the companion's Live Activity replaces this
         var lines = [statusMarker]
         if remoteAccessEnabled, server?.isNearbyAdvertising ?? false {
             lines.append("“\(NearbyIdentity.name)”")

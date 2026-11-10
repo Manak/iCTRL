@@ -19,6 +19,12 @@ struct ClaudeBridgeSettingsLink: View {
         } footer: {
             Text("Let the Claude app operate allowlisted apps on this phone through a private Tailscale Funnel address.")
         }
+        // Whenever the app comes to the front, bring the Live Activity in
+        // line with the runner (it may have stopped while this app slept).
+        .task { await ClaudeBridgeSession.shared.refreshAndSync() }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            Task { await ClaudeBridgeSession.shared.refreshAndSync() }
+        }
     }
 }
 
@@ -32,6 +38,10 @@ struct ClaudeBridgeStatus: Equatable {
     var hostname = ""
     var hasAuthKey = false
     var lockedOut = false
+    var sessionStarted: Date?
+    /// When the session ends if Claude stays quiet.
+    var endsAt: Date?
+    var idleLimitMinutes = 30.0
 
     init() {}
 
@@ -44,6 +54,9 @@ struct ClaudeBridgeStatus: Equatable {
         hostname = result["hostname"] as? String ?? ""
         hasAuthKey = result["has_auth_key"] as? Bool ?? false
         lockedOut = result["locked_out"] as? Bool ?? false
+        sessionStarted = (result["session_started"] as? Double).map(Date.init(timeIntervalSince1970:))
+        endsAt = (result["ends_at"] as? Double).map(Date.init(timeIntervalSince1970:))
+        idleLimitMinutes = result["idle_limit_minutes"] as? Double ?? 30
     }
 }
 
@@ -64,11 +77,14 @@ final class ClaudeBridgeModel: ObservableObject {
 
     func refresh() async {
         do {
-            status = ClaudeBridgeStatus(try await call("status"))
+            let fresh = ClaudeBridgeStatus(try await call("status"))
+            status = fresh
             runnerDown = false
+            await ClaudeBridgeSession.shared.sync(fresh)
         } catch RunnerClient.Failure.notRunning {
             runnerDown = true
             status = nil
+            await ClaudeBridgeSession.shared.endActivity()
         } catch RunnerClient.Failure.notPaired, RunnerClient.Failure.keyRejected {
             status = nil
         } catch {
@@ -80,6 +96,15 @@ final class ClaudeBridgeModel: ObservableObject {
         await run {
             self.status = ClaudeBridgeStatus(try await self.call("set_mode", ["mode": on ? "funnel" : "off"]))
             self.notice = on ? "Claude via Funnel is on. The address goes live in a few seconds." : "Claude via Funnel is off. Nothing is reachable from the internet."
+        }
+    }
+
+    func stopSession() async {
+        await run {
+            let outcome = await ClaudeBridgeSession.shared.stop()
+            self.notice = outcome.message
+            self.status = nil
+            self.runnerDown = outcome.ok
         }
     }
 
@@ -223,8 +248,23 @@ struct ClaudeBridgeView: View {
             if let error = status.tunnelError {
                 Text(error).font(.footnote).foregroundColor(.orange)
             }
+            if status.running, let ends = status.endsAt {
+                HStack {
+                    Text("Auto-off if idle")
+                    Spacer()
+                    Text(ends, style: .time).foregroundColor(.secondary)
+                }
+            }
+            if status.running {
+                Button(role: .destructive) {
+                    Task { await model.stopSession() }
+                } label: {
+                    Label("Stop session", systemImage: "stop.circle")
+                }
+                .disabled(model.busy)
+            }
         } footer: {
-            Text("While this is on, the raw iCTRL API is limited to this device and only the Claude bridge is reachable from outside. Turning it off, or stopping the runner, takes the address offline.")
+            Text("While this is on, the raw iCTRL API is limited to this device and only the Claude bridge is reachable from outside. The session ends by itself after \(Int(status.idleLimitMinutes)) minutes without a request from Claude. Stop session shuts down the address, the bridge and the runner.")
         }
     }
 

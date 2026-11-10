@@ -22,8 +22,10 @@ targets:
     sources:
       - path: iCTRLApp
       - path: iCTRLKit
-      # CLAUDE-BRIDGE HOOK: companion-app screens for the bridge.
+      # CLAUDE-BRIDGE HOOK: companion-app screens for the bridge, and the
+      # Live Activity model shared with the widget extension.
       - path: ClaudeBridge/App
+      - path: ClaudeBridge/Shared
       # Shared with the runner: one string table for both processes, so a phrase
       # the user sees in a notification matches the one in the app.
       - path: iCTRLUITests/Localized.swift
@@ -35,8 +37,12 @@ targets:
       # in the repo tree, so SPM cannot resolve it by URL.
       - framework: Frameworks/IDevice.xcframework
         embed: false
+      # CLAUDE-BRIDGE HOOK: embeds the Live Activity widget extension.
+      - target: iCTRLBridgeWidget
     settings:
       base:
+        # CLAUDE-BRIDGE HOOK: lets the app show a Live Activity.
+        INFOPLIST_KEY_NSSupportsLiveActivities: YES
         PRODUCT_BUNDLE_IDENTIFIER: "$(ICTRL_BUNDLE_PREFIX).ictrl"
         GENERATE_INFOPLIST_FILE: YES
         MARKETING_VERSION: "1.0.0"
@@ -113,6 +119,25 @@ targets:
           rm -f  "${RUNNER_APP}/Frameworks/libXCTestSwiftSupport.dylib"
           rmdir  "${RUNNER_APP}/Frameworks" 2>/dev/null || true
           echo "✅ Frameworks stripped"
+
+  # CLAUDE-BRIDGE HOOK: widget extension that draws the Claude bridge Live Activity.
+  iCTRLBridgeWidget:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: ClaudeBridge/Widget
+        excludes: ["Info.plist"]
+      - path: ClaudeBridge/Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: "$(ICTRL_BUNDLE_PREFIX).ictrl.bridgewidget"
+        INFOPLIST_FILE: ClaudeBridge/Widget/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: 1
+        CODE_SIGN_STYLE: Automatic
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) CLAUDE_BRIDGE_WIDGET"
 
 schemes:
   iCTRL:

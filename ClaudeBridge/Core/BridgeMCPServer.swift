@@ -27,6 +27,8 @@ final class BridgeMCPServer {
 
     private let auth: BridgeAuthenticator
     private let tools: BridgeTools
+    /// Called for every request that passed authentication (any method).
+    var onAuthenticRequest: (() -> Void)?
 
     init(auth: BridgeAuthenticator, tools: BridgeTools) {
         self.auth = auth
@@ -35,6 +37,7 @@ final class BridgeMCPServer {
 
     func handle(_ request: BridgeHTTPRequest) -> BridgeHTTPResponse {
         guard auth.authorize(request) else { return .notFound }
+        onAuthenticRequest?()
 
         guard request.method == "POST" else {
             // Authentic, but this server offers no GET stream and no sessions.
