@@ -37,6 +37,9 @@ struct BridgeUITree {
         let identifier: String?
         let frame: Rect
         var parent: Int?
+        /// The app has greyed this element out.
+        var disabled = false
+        var selected = false
     }
 
     private(set) var nodes: [Node] = []
@@ -58,9 +61,13 @@ struct BridgeUITree {
             let type = head.split(separator: ",", maxSplits: 1).first.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
 
             while let last = stack.last, last.depth >= indent { stack.removeLast() }
-            let node = Node(index: nodes.count, depth: indent, type: type,
+            var node = Node(index: nodes.count, depth: indent, type: type,
                             label: Self.field("label", in: head), value: Self.field("value", in: head),
                             identifier: Self.field("id", in: head), frame: frame, parent: stack.last?.index)
+            // State words sit between the last field and the frame.
+            let tail = head.components(separatedBy: "', ").last ?? head
+            node.disabled = tail.contains(", disabled") || tail.hasPrefix("disabled")
+            node.selected = tail.contains(", selected") || tail.hasPrefix("selected")
             nodes.append(node)
             stack.append((indent, node.index))
         }
@@ -110,6 +117,11 @@ struct BridgeUITree {
 
     static let scrollTypes: Set<String> = ["Table", "CollectionView", "ScrollView", "WebView"]
 
+    /// The nearest enclosing element that probably responds to a tap.
+    func tappableAncestor(of node: Node) -> Node? {
+        ancestor(of: node) { BridgeTappableHint.isLikelyTappable($0) }
+    }
+
     /// The scrolling view a node lives in, if any.
     func scrollContainer(of node: Node) -> Node? {
         ancestor(of: node) { Self.scrollTypes.contains($0.type) }
@@ -141,6 +153,53 @@ struct BridgeUITree {
         let frame = effectiveFrame(of: node)
         return frame.midY >= area.y + margin && frame.midY <= area.maxY - margin
             && frame.midX >= area.x && frame.midX <= area.maxX
+    }
+}
+
+/// Marks the elements that probably respond to a tap.
+///
+/// iOS has no "clickable" flag. An element's type says a lot (a Button is
+/// tappable), but many real controls are plain views whose only clue is their
+/// identifier. So this is a hint, not a fact: it will miss custom controls
+/// and can flag something inert.
+enum BridgeTappableHint {
+    static let types: Set<String> = [
+        "Button", "Link", "Cell", "Switch", "TextField", "SecureTextField", "SearchField", "TextView",
+        "Slider", "SegmentedControl", "Key", "Icon", "PickerWheel",
+    ]
+    /// Words that mark a control when they appear as a part of an identifier.
+    static let identifierWords: Set<String> = ["button", "btn", "tab", "cta", "link", "toggle", "checkbox", "radiobutton", "chip"]
+
+    static func isLikelyTappable(_ node: BridgeUITree.Node) -> Bool {
+        guard !node.disabled, !node.frame.isEmpty else { return false }
+        if types.contains(node.type) { return true }
+        guard let id = node.identifier?.lowercased() else { return false }
+        let parts = id.split(whereSeparator: { !$0.isLetter })
+        return parts.contains { identifierWords.contains(String($0)) }
+    }
+
+    /// Adds ", tappable" before the frame of each line that qualifies.
+    static func annotate(_ source: String) -> String {
+        let tree = BridgeUITree(source: source)
+        var marked = Set<Int>()
+        for node in tree.nodes where isLikelyTappable(node) { marked.insert(node.index) }
+        guard !marked.isEmpty else { return source }
+        var out: [String] = []
+        var index = 0
+        for line in source.components(separatedBy: "\n") {
+            // Only lines that end in a frame are nodes, in the same order.
+            guard let frame = line.range(of: ", {{", options: .backwards), line.hasSuffix("}}") else {
+                out.append(line)
+                continue
+            }
+            if marked.contains(index) {
+                out.append(line.replacingCharacters(in: frame.lowerBound..<frame.lowerBound, with: ", tappable"))
+            } else {
+                out.append(line)
+            }
+            index += 1
+        }
+        return out.joined(separator: "\n")
     }
 }
 

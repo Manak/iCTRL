@@ -146,6 +146,9 @@ final class ClaudeBridgeRunner {
             AppMemory.shared.recordOpened(bundleId: app.bundleID, name: app.name)
         }
 
+        tools.isHittable = { bundle, text, contains, occurrence in
+            ClaudeBridgeJump.isHittable(bundleID: bundle, text: text, contains: contains, occurrence: occurrence)
+        }
         tools.jumpToElement = { bundle, text, contains, occurrence in
             ClaudeBridgeJump.scrollToVisible(bundleID: bundle, text: text, contains: contains, occurrence: occurrence)
         }

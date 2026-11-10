@@ -32,6 +32,8 @@ arguments.
 | `read_ui` | refused | UI tree with frames. Starts with the scroll position (how far down, how much content above and below). Optional `filter_text`; `include_offscreen` also lists elements loaded beyond the screen edges. |
 | `scroll` | refused | Precise scrolling without momentum: `direction` plus `pages` (a fraction of a screen) or `points`; optional `x`,`y` to scroll one area. Reports whether it moved and the new position. |
 | `scroll_to` | refused | Brings an element into view by label or identifier and returns its tap point. |
+| `check_element` | refused | Reports on one element without touching it: found or not, kind and state, on screen or not, whether a tap would reach it, and how far to scroll to centre it. |
+| `run_steps` | refused | Runs up to 10 actions in one call (`tap_element`, `scroll_to`, `tap`, `scroll`, `swipe`, `type_text`, `check_element`, `wait`). Stops at the first failure; each step is guarded like a separate call. |
 | `tap_element` | refused | Taps an element by label or identifier wherever it is: scrolls it into view first if it is off screen, waits for the list to stop, then taps. `occurrence` picks among duplicates. |
 | `tap` | refused | x, y in points. |
 | `swipe` | refused | Low-level gesture (pull to refresh, swipe a row). Refuses starts within 40 pt of the top edge or 50 pt of the bottom edge (system gestures). |
@@ -229,6 +231,33 @@ the list, and the basket total changed to match.
    top and bottom; one exact slow drag does that.
 3. **Fall back to gestures** if the app will not jump: one call to the
    device's paging for the long stretch, then the exact drag.
+
+### What the tree says about each element
+
+iOS has no "clickable" flag, so `read_ui` adds three words, placed just before
+an element's frame:
+
+| Word | Meaning | Where it comes from |
+|---|---|---|
+| `tappable` | Probably responds to a tap | A hint: the element's type (Button, Link, Cell, Switch, text fields, …) or a control word in its identifier (`…_button`, `…_tab`, `cta`, `checkbox`, …). Misses custom controls; can flag something inert. Never given to a disabled element |
+| `disabled` | Greyed out by the app | The accessibility snapshot's enabled flag (hook in `ForegroundApp.m`, code in `ClaudeBridgeTreeState.m`) |
+| `selected` | The active one of a set | The snapshot's selected flag |
+
+`check_element` answers the per-element questions. "A tap would reach it" is
+XCTest's own hittable test; on the phone it said yes for a row sitting under
+the menu's header, where a tap had missed, so treat a "yes" at the very edge
+with suspicion. "Scroll needed" is worked out from the row's real position and
+is what to rely on.
+
+After `scroll_to` or `tap_element` has moved a list, the bridge runs the same
+reachability test before tapping. If the element is covered where it stopped,
+it is put in the exact middle and tested again; if it is still covered,
+`tap_element` reports that instead of tapping.
+
+Cost: each lookup of an element by label takes about 3.5 s on a large screen
+(Grab's menu). A `tap_element` that has to scroll now does up to three of
+them (jump, reachability, tap), so it takes around 20 s there. `run_steps`
+saves the round trips between steps, not this time.
 
 ### Pressing an element with no touch at all: tried, not working
 

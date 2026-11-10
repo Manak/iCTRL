@@ -843,6 +843,10 @@ static NSMutableString *ICTRLBuildLine(NSInteger depth, NSInteger type, NSString
     return line;
 }
 
+// CLAUDE-BRIDGE HOOK: every tree line also gets ", disabled" / ", selected" (ClaudeBridgeTreeState.m).
+extern void ClaudeBridgeAppendState(NSMutableString *line, id node);
+#define ICTRLBuildLine(d, t, l, v, i, f) ({ NSMutableString *cb_line = (ICTRLBuildLine)(d, t, l, v, i, f); ClaudeBridgeAppendState(cb_line, node); cb_line; })
+
 /// Element types that are never content: the scroll indicators UIKit overlays on
 /// top of a list. They sit INSIDE the content band, carry a label
 /// ("垂直滚动条, 16页" / "Vertical scroll bar"), and so survive every

@@ -30,7 +30,8 @@ final class GuardAndToolTests: XCTestCase {
         let calls: [(String, BridgeJSON)] = [
             ("screenshot", [:]), ("read_ui", [:]), ("tap", ["x": 1, "y": 1]),
             ("swipe", ["direction": "up"]), ("scroll", ["direction": "down"]),
-            ("scroll_to", ["text": "Send"]), ("tap_element", ["text": "Send"]), ("type_text", ["text": "hi"]),
+            ("scroll_to", ["text": "Send"]), ("tap_element", ["text": "Send"]), ("check_element", ["text": "Send"]),
+            ("type_text", ["text": "hi"]),
             ("launch_app", ["bundle_id": whatsApp]), ("open_url", ["url": "whatsapp://send"]),
         ]
         for (name, args) in calls {
@@ -288,7 +289,7 @@ final class GuardAndToolTests: XCTestCase {
     func testThereIsNoToolThatChangesTheAllowlist() {
         let names = BridgeTools.toolNames
         XCTAssertEqual(names, ["phone_status", "list_allowed_apps", "screenshot", "read_ui", "tap",
-                               "swipe", "scroll", "scroll_to", "tap_element", "type_text", "launch_app", "open_url", "go_home"])
+                               "swipe", "scroll", "scroll_to", "tap_element", "check_element", "run_steps", "type_text", "launch_app", "open_url", "go_home"])
     }
 
     func testReadOnlyAppBlocksTyping() {
@@ -875,7 +876,7 @@ final class GuardAndToolTests: XCTestCase {
         h.raw.results["page_source"] = .success(["source": "Application, label: 'Shop', {{0, 0}, {375, 667}}\n  Button, label: 'Buy', {{0, 0}, {100, 50}}"])
         let text = h.call("read_ui").firstText
         // Stage scale 393/786 = 0.5: the button is at (100, 250), 50 x 25.
-        XCTAssertTrue(text.contains("Button, label: 'Buy', {{100, 250}, {50, 25}}"), text)
+        XCTAssertTrue(text.contains("Button, label: 'Buy', tappable, {{100, 250}, {50, 25}}"), text)
     }
 
     func testCoordinateMapFromAMeasuredWindow() {
@@ -902,11 +903,172 @@ final class GuardAndToolTests: XCTestCase {
         let text = h.call("read_ui").firstText
         let read = h.raw.calls.first { $0.method == "page_source" && $0.params["bundle_id"] as? String != BridgeGuard.springboard }!
         XCTAssertEqual(read.params["bundle_id"] as? String, "com.example.shop", "the app is named explicitly")
-        XCTAssertTrue(text.contains("Button, label: 'Buy', {{114, 122}, {28, 28}}"), text)
+        XCTAssertTrue(text.contains("Button, label: 'Buy', tappable, {{114, 122}, {28, 28}}"), text)
         XCTAssertTrue(h.call("phone_status").firstText.contains("Shop"))
 
         // And when the inspector cannot vouch for the screen, it is a lockout.
         h.guardian.screenInspector = { _, _ in BridgeScreenInspection(foregroundBundle: nil, appWindow: nil) }
         XCTAssertEqual(h.call("read_ui").status, .lockedOut)
+    }
+
+    // MARK: Tappable hint, element state, check_element
+
+    func testTreeReadsDisabledAndSelectedState() {
+        let tree = BridgeUITree(source: [
+            "Application, label: 'A', {{0, 0}, {393, 852}}",
+            "  Button, label: 'Add to Basket', id: 'add_button', disabled, {{16, 700}, {360, 56}}",
+            "  Other, id: 'tab_home', selected, {{0, 60}, {90, 40}}",
+            "  StaticText, label: 'Sorry, disabled today', {{0, 200}, {200, 20}}",
+        ].joined(separator: "\n"))
+        XCTAssertTrue(tree.nodes[1].disabled)
+        XCTAssertFalse(tree.nodes[1].selected)
+        XCTAssertTrue(tree.nodes[2].selected)
+        XCTAssertFalse(tree.nodes[3].disabled, "the word inside a label is not a state")
+        XCTAssertEqual(tree.nodes[1].identifier, "add_button")
+    }
+
+    func testTappableHint() {
+        let source = [
+            "Application, label: 'A', {{0, 0}, {393, 852}}",
+            "  Button, label: 'Buy', {{0, 0}, {50, 50}}",
+            "  Button, label: 'Sold out', disabled, {{0, 60}, {50, 50}}",
+            "  Other, id: 'home_tabbar_tab_1', {{0, 120}, {90, 40}}",
+            "  StaticText, label: 'Just words', {{0, 200}, {200, 20}}",
+            "  Cell, id: 'product_card', {{0, 240}, {180, 240}}",
+            "  Other, id: 'stable_container', {{0, 500}, {180, 40}}",
+        ].joined(separator: "\n")
+        let lines = BridgeTappableHint.annotate(source).components(separatedBy: "\n")
+        XCTAssertFalse(lines[0].contains("tappable"))
+        XCTAssertEqual(lines[1], "  Button, label: 'Buy', tappable, {{0, 0}, {50, 50}}")
+        XCTAssertFalse(lines[2].contains("tappable"), "a disabled button is not tappable")
+        XCTAssertTrue(lines[3].contains(", tappable, {{"), "identifier names a tab")
+        XCTAssertFalse(lines[4].contains("tappable"))
+        XCTAssertTrue(lines[5].contains(", tappable, {{"))
+        XCTAssertFalse(lines[6].contains("tappable"), "'stable' is not the word 'tab'")
+        // The annotated text still parses to the same frames.
+        XCTAssertEqual(BridgeUITree(source: lines.joined(separator: "\n")).nodes.map(\.frame), BridgeUITree(source: source).nodes.map(\.frame))
+    }
+
+    func testCheckElementOnScreenAndReachable() {
+        let h = Harness()
+        _ = scrollingMenu(h)
+        h.tools.isHittable = { _, _, _, _ in true }
+        let text = h.call("check_element", ["text": "Fries"]).firstText
+        XCTAssertTrue(text.contains("On screen: yes"))
+        XCTAssertTrue(text.contains("A tap would reach it: yes."))
+        XCTAssertTrue(text.contains("Kind: StaticText, inside a Cell that is probably tappable"), text)
+        // A fixed button outside the list has nothing to scroll.
+        let bar = h.call("check_element", ["text": "Add to Basket"]).firstText
+        XCTAssertTrue(bar.contains("Kind: Button, probably tappable"), bar)
+        XCTAssertTrue(bar.contains("Scroll needed: none."), bar)
+        XCTAssertEqual(h.raw.actionCalls.filter { $0 != "page_source" }, [], "check_element touches nothing")
+    }
+
+    func testCheckElementSaysHowFarToScroll() {
+        let h = Harness()
+        _ = scrollingMenu(h)
+        // "Apple Pie" is the sixth row: its row is at y=1100 in a list showing 84...559.
+        let text = h.call("check_element", ["text": "Apple Pie"]).firstText
+        XCTAssertTrue(text.contains("On screen: no."), text)
+        XCTAssertTrue(text.contains("it has to be scrolled into view first"))
+        // Row centre 1128, view centre 321.5: 806.5 app points, times 393/375.
+        XCTAssertTrue(text.contains("Scroll needed: down about 845 points (1.5 pages)"), text)
+    }
+
+    func testCheckElementReportsCoveredAndNotFound() {
+        let h = Harness()
+        _ = scrollingMenu(h)
+        h.tools.isHittable = { _, _, _, _ in false }
+        XCTAssertTrue(h.call("check_element", ["text": "Fries"]).firstText.contains("something is covering it"))
+        XCTAssertTrue(h.call("check_element", ["text": "Pizza"]).firstText.contains("not found"))
+    }
+
+    func testAfterScrollingACoveredElementIsRecentredThenRefused() {
+        let h = Harness()
+        _ = scrollingMenu(h)
+        var asked = 0
+        h.tools.isHittable = { _, _, _, _ in asked += 1; return false }
+        let r = h.call("tap_element", ["text": "Apple Pie"])
+        XCTAssertTrue(r.isError)
+        XCTAssertTrue(r.firstText.contains("something is covering it"), r.firstText)
+        XCTAssertFalse(h.raw.actionCalls.contains("tap"), "no tap is sent at a covered element")
+        XCTAssertGreaterThanOrEqual(asked, 1)
+    }
+
+    func testAfterScrollingAReachableElementIsTapped() {
+        let h = Harness()
+        _ = scrollingMenu(h)
+        var asked = 0
+        h.tools.isHittable = { _, _, _, _ in asked += 1; return true }
+        XCTAssertFalse(h.call("tap_element", ["text": "Apple Pie"]).isError)
+        XCTAssertEqual(asked, 1, "checked once, after the scroll")
+        XCTAssertTrue(h.raw.actionCalls.contains("tap"))
+    }
+
+    func testNoReachabilityCheckWhenNothingWasScrolled() {
+        let h = Harness()
+        _ = scrollingMenu(h)
+        var asked = 0
+        h.tools.isHittable = { _, _, _, _ in asked += 1; return true }
+        XCTAssertFalse(h.call("tap_element", ["text": "Fries"]).isError)
+        XCTAssertEqual(asked, 0)
+    }
+
+    // MARK: Chained steps
+
+    func testRunStepsRunsInOrderInOneCall() {
+        let h = Harness()
+        _ = scrollingMenu(h)
+        let r = h.call("run_steps", ["steps": [
+            ["tool": "scroll_to", "text": "Apple Pie"],
+            ["tool": "tap_element", "text": "Apple Pie"],
+            ["tool": "wait", "seconds": 1],
+            ["tool": "tap", "x": 50, "y": 300],
+        ]])
+        XCTAssertFalse(r.isError, r.firstText)
+        let text = r.firstText
+        XCTAssertTrue(text.contains("1. scroll_to: the element is in view"))
+        XCTAssertTrue(text.contains("2. tap_element: tapped"))
+        XCTAssertTrue(text.contains("3. wait: done"))
+        XCTAssertTrue(text.contains("4. tap: done"))
+        XCTAssertEqual(h.raw.actionCalls.filter { $0 == "tap" }.count, 2)
+        // Every step is in the action log, and the chain itself.
+        XCTAssertEqual(h.log.all.map(\.tool), ["scroll_to", "tap_element", "tap", "run_steps"])
+    }
+
+    func testRunStepsStopsAtTheFirstFailure() {
+        let h = Harness()
+        _ = scrollingMenu(h)
+        h.raw.results["page"] = .success(["moved": false])
+        let r = h.call("run_steps", ["steps": [
+            ["tool": "tap_element", "text": "Fries"],
+            ["tool": "tap_element", "text": "Pizza"],
+            ["tool": "tap_element", "text": "Corn"],
+        ]])
+        XCTAssertTrue(r.isError)
+        XCTAssertTrue(r.firstText.contains("Stopped here: 1 later step(s) were not run."), r.firstText)
+        XCTAssertEqual(h.raw.actionCalls.filter { $0 == "tap" }.count, 1, "only the first tap happened")
+    }
+
+    func testRunStepsStopsWhenAStepLeavesTheAllowlist() {
+        let h = Harness()
+        h.raw.foreground = whatsApp
+        var taps = 0
+        h.raw.afterCall = { if $0 == "tap" { taps += 1; h.raw.foreground = safari } }
+        let r = h.call("run_steps", ["steps": [["tool": "tap", "x": 1, "y": 1], ["tool": "tap", "x": 2, "y": 2]]])
+        XCTAssertTrue(r.isError)
+        XCTAssertEqual(r.status, .lockedOut)
+        XCTAssertEqual(taps, 1, "the second tap never ran")
+    }
+
+    func testRunStepsRefusesBadListsBeforeDoingAnything() {
+        let h = Harness()
+        h.raw.foreground = whatsApp
+        XCTAssertEqual(h.call("run_steps", ["steps": []]).status, .refused)
+        XCTAssertEqual(h.call("run_steps", ["steps": [["tool": "tap", "x": 1, "y": 1], ["tool": "launch_app", "bundle_id": whatsApp]]]).status, .refused)
+        XCTAssertEqual(h.call("run_steps", ["steps": [["tool": "run_steps", "steps": []]]]).status, .refused)
+        XCTAssertEqual(h.call("run_steps", ["steps": [["tool": "wait", "seconds": 60]]]).status, .refused)
+        XCTAssertEqual(h.call("run_steps", ["steps": Array(repeating: ["tool": "tap", "x": 1, "y": 1], count: 11)]).status, .refused)
+        XCTAssertEqual(h.raw.calls.count, 0)
     }
 }
