@@ -358,6 +358,7 @@ final class iCTRLUITests: XCTestCase, UNUserNotificationCenterDelegate {
         // Record WHY the test is ending — this is the main place a silent exit
         // shows up (XCTest tears the test down → server stops).
         Self.logBuffer.append("🚪 tearDownWithError — test ending, stopping server. keepRunning=\(keepRunning)")
+        ClaudeBridgeRunner.shared.stop()  // CLAUDE-BRIDGE HOOK
         server?.stop()
         server = nil
         actionHandler = nil
@@ -466,6 +467,10 @@ final class iCTRLUITests: XCTestCase, UNUserNotificationCenterDelegate {
         wireServerStateChange()
         observeNetworkChanges()
         requestLocalNetworkAtLaunch()
+        // CLAUDE-BRIDGE HOOK: start the Claude bridge (does nothing unless enabled).
+        ClaudeBridgeRunner.shared.start { [weak self] method, params, done in
+            if let rpc = self?.server?.onRPCRequest { rpc(method, params, done) } else { done(nil, .internalError) }
+        }
 
         // When the app comes back to the foreground (e.g. the user opened it to
         // grant the Local Network permission), re-verify remote reachability — if
@@ -528,6 +533,7 @@ final class iCTRLUITests: XCTestCase, UNUserNotificationCenterDelegate {
             }
         }
         safetyTimer.invalidate()
+        ClaudeBridgeRunner.shared.stop()  // CLAUDE-BRIDGE HOOK
         // Only reached when keepRunning was set false (stop_server / notification /
         // config restart). If we ever get here unexpectedly, the log shows it.
         Self.logBuffer.append("🔁 run loop exited (keepRunning=false)")

@@ -59,6 +59,9 @@ targets:
     sources:
       - path: iCTRLUITests
       - path: iCTRLKit
+      # CLAUDE-BRIDGE HOOK: bridge sources compiled into the runner.
+      - path: ClaudeBridge/Core
+      - path: ClaudeBridge/Runner
       # The operating manual, bundled so GET /skill can serve it at runtime.
       - path: SKILL.md
         buildPhase: resources
