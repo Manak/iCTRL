@@ -21,6 +21,10 @@ Rules for this list:
 | `iCTRLUITests/iCTRLUITests.swift` | In `testStartServer`, after `safetyTimer.invalidate()`: `ClaudeBridgeRunner.shared.stop()`. | Stops the bridge on every path that ends the run loop. |
 | `iCTRLUITests/iCTRLUITests.swift` | In `tearDownWithError`, after the log line: `ClaudeBridgeRunner.shared.stop()`. | Stops the bridge if XCTest tears the test down directly. |
 | `project.yml` | Under `iCTRLUITests` → `sources`, after `- path: iCTRLKit`: two source paths, `ClaudeBridge/Core` and `ClaudeBridge/Runner`. | Compiles the bridge into the runner. |
+| `project.yml` | Under `iCTRLUITests` → `dependencies`, after `- target: iCTRL`: the static framework `ClaudeBridge/build/ClaudeBridgeTS.xcframework` with `embed: false`. | Links the Tailscale (tsnet) library into the runner. |
+| `project.yml` | Under `iCTRLUITests` → `settings` → `base`, first entry: `OTHER_LDFLAGS` with `-lresolv`, CoreFoundation and Security. | System libraries the Go runtime needs. |
+| `iCTRLKit/JSONRPCServer.swift` | In `init`: `self.localOnly = localOnly \|\| ClaudeBridgeGate.forceLocalOnly`. | Keeps the raw API on loopback while Funnel mode is on, whatever the remote-access setting says. |
+| `Makefile` | Last two lines: `-include ClaudeBridge/bridge.mk`. | Builds the Go library before `build`; adds `make bridge-test`. |
 
 ## New files and folders (no conflict risk)
 
@@ -34,7 +38,11 @@ Rules for this list:
 | `ClaudeBridge/docs/VIABILITY.md` | Stage 1 findings: can tsnet run inside the runner. |
 | `ClaudeBridge/docs/MCP_LAYER.md` | Stage 2: what the MCP layer does and how to try it. |
 | `ClaudeBridge/Core/` | The bridge itself: MCP protocol, tools, allowlist guard, auth, loopback HTTP listener. Foundation and Network only. |
-| `ClaudeBridge/Runner/` | Glue to iCTRL's types: RPC adapter, keychain secret, allowlist storage. |
+| `ClaudeBridge/Runner/` | Glue to iCTRL's types: RPC adapter, keychain secrets, allowlist storage, Tailscale tunnel wrapper. |
+| `ClaudeBridge/go/` | The Tailscale side: tsnet + Funnel reverse proxy, built as a static iOS library by `build-ios.sh`. |
+| `ClaudeBridge/bridge.mk` | Makefile rules for the Go library, included from the upstream Makefile. |
+| `ClaudeBridge/docs/FUNNEL.md` | Stage 3: architecture, Tailscale policy, auth key, storage. |
+| `iCTRLKit/ClaudeBridgeGate.swift` | New file in an upstream folder: the "Funnel mode is on" switch, shared by the raw server and the bridge. It is here because `JSONRPCServer` is compiled into both the app and the runner. |
 | `ClaudeBridge/Tests/`, `ClaudeBridge/Package.swift` | Mac unit tests (`cd ClaudeBridge && swift test`). Not part of the iOS build. |
 
 Note: upstream already has a `Scripts/` folder. macOS file systems are
