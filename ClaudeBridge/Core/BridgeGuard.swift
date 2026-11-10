@@ -48,6 +48,13 @@ struct BridgeToolResult {
 /// the home screen or an allowlisted app is in front again.
 final class BridgeGuard {
     static let springboard = "com.apple.springboard"
+    /// System surfaces treated like the home screen: always permitted, never
+    /// launchable through launch_app, not part of the editable allowlist.
+    /// On iOS 27 the pull-down search is its own process, "Siri AI", whose
+    /// bundle id is com.apple.campo (read from the device's system log).
+    static let systemSurfaces = [
+        BridgeAllowedApp(bundleID: "com.apple.campo", name: "Search"),
+    ]
     static let lockedOutMessage =
         "locked: non-allowlisted app in foreground. Only go_home is available; call it to return to the home screen."
     static let phoneLockedMessage =
@@ -97,8 +104,10 @@ final class BridgeGuard {
             foreground = .phoneLocked
         } else if let bundle = system["foreground_app"] as? String, !bundle.isEmpty {
             if bundle == Self.springboard {
-                foreground = .home
-            } else if let app = allowlist.app(bundleID: bundle) {
+                // SpringBoard also hosts the app switcher, which shows other
+                // apps' screens. Only the real home screen counts as home.
+                foreground = springboardShowsHomeScreen()
+            } else if let app = allowlist.app(bundleID: bundle) ?? Self.systemSurfaces.first(where: { $0.bundleID == bundle }) {
                 foreground = .allowed(app)
             } else {
                 foreground = .blocked
@@ -109,6 +118,30 @@ final class BridgeGuard {
         }
         if record { note(foreground) }
         return BridgeProbe(foreground: foreground, pointWidth: width, pointHeight: height, system: system)
+    }
+
+    /// Looks at SpringBoard's own UI tree to tell the home screen from the
+    /// other things SpringBoard shows. Fails closed: home needs positive
+    /// evidence (the icon grid) and no sign of the app switcher.
+    private func springboardShowsHomeScreen() -> BridgeForeground {
+        let result = raw.call("page_source", [
+            "bundle_id": Self.springboard, "visible_only": true, "max_children": 50,
+        ])
+        guard case .success(let page) = result, let source = page["source"] as? String else {
+            var reason = "home screen could not be inspected"
+            if case .failure(let message) = result { reason = message }
+            return .unverified(reason)
+        }
+        return Self.isHomeScreen(springboardSource: source) ? .home : .blocked
+    }
+
+    /// Element ids, as they appear in iCTRL's page_source text on iOS 27.
+    static let homeScreenMarker = "id: 'Home screen icons'"
+    static let notHomeMarkers = ["AppSwitcherContentView", "SBSwitcherWindow"]
+
+    static func isHomeScreen(springboardSource source: String) -> Bool {
+        guard source.contains(homeScreenMarker) else { return false }
+        return !notHomeMarkers.contains { source.contains($0) }
     }
 
     private func note(_ foreground: BridgeForeground) {
@@ -159,14 +192,7 @@ final class BridgeGuard {
         // An app that is still launching can be unnameable for a moment. Give
         // it a short grace period before calling it a lockout; nothing else
         // runs meanwhile, because the run lock is held.
-        var after = probe(record: false)
-        var retries = settleRetries
-        while case .blocked = after.foreground, retries > 0 {
-            sleep(settleDelay)
-            after = probe(record: false)
-            retries -= 1
-        }
-        note(after.foreground)
+        let after = settledProbe()
         switch after.foreground {
         case .home, .allowed:
             return result
@@ -181,28 +207,61 @@ final class BridgeGuard {
         }
     }
 
-    /// Presses Home. The only action permitted during lockout.
+    /// Reads the foreground, re-checking a blocked reading a few times before
+    /// accepting it. Records the final reading only.
+    private func settledProbe() -> BridgeProbe {
+        var reading = probe(record: false)
+        var retries = settleRetries
+        while case .blocked = reading.foreground, retries > 0 {
+            sleep(settleDelay)
+            reading = probe(record: false)
+            retries -= 1
+        }
+        note(reading.foreground)
+        return reading
+    }
+
+    /// Returns to the home screen. The only action permitted during lockout.
+    ///
+    /// It brings SpringBoard forward as an app, then falls back to the Home
+    /// button. It does not use the bottom-edge swipe: that gesture can stop in
+    /// the app switcher, which shows other apps' screens.
     func goHome() -> BridgeToolResult {
         runLock.lock(); defer { runLock.unlock() }
 
         let before = probe()
-        if case .phoneLocked = before.foreground {
+        switch before.foreground {
+        case .phoneLocked:
             return .error(Self.phoneLockedMessage, status: .phoneLocked)
+        case .home:
+            return .text("Home screen is in front. All tools are available.")
+        default:
+            break
         }
-        let pressed = raw.call("home", [:])
-        let after = probe()
+
+        _ = raw.call("activate_app", ["bundle_id": Self.springboard])
+        var after = settledProbe()
+        // Stop as soon as something permitted is in front. (The iOS 27 search
+        // screen ignores both methods and stays up; it is permitted, so that
+        // is reported as it is rather than paid for with a slow Home press.)
+        var clear = false
+        switch after.foreground {
+        case .home, .allowed: clear = true
+        default: break
+        }
+        if !clear {
+            _ = raw.call("home", [:])
+            after = settledProbe()
+        }
         switch after.foreground {
         case .home:
             return .text("Home screen is in front. All tools are available.")
-        case .allowed:
-            return .text("An allowlisted app is in front. All tools are available.")
+        case .allowed(let app):
+            return .text("\(app.name) is in front, which is permitted. All tools are available.")
         case .phoneLocked:
             return .error(Self.phoneLockedMessage, status: .phoneLocked)
         case .blocked, .unverified:
-            if case .failure = pressed {
-                return .error("go_home failed: the Home press did not go through. The bridge is still locked; try again.", status: .lockedOut)
-            }
-            return .error("go_home pressed Home, but the home screen is not in front yet. The bridge is still locked; try again.", status: .lockedOut)
+            return .error("go_home could not bring the home screen to the front. The bridge is still locked; try again, or ask the phone's owner to return to the home screen.", status: .lockedOut)
         }
     }
 }

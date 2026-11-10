@@ -16,7 +16,15 @@ final class MockRawAPI: BridgeRawAPI {
     /// Successive foreground values consumed by device_info, if set.
     var foregroundScript: [String?] = []
 
-    var actionCalls: [String] { calls.map(\.method).filter { $0 != "device_info" } }
+    /// What SpringBoard's UI tree looks like when the guard inspects it.
+    var springboardSource = "Other, id: 'Home screen icons', {{0, 0}, {393, 852}}"
+    static let appSwitcherSource = "Other, id: 'Home screen icons'\nOther, id: 'AppSwitcherContentView'\nWindow, id: 'SBSwitcherWindow:Main'"
+
+    private static func isProbe(_ method: String, _ params: BridgeJSON) -> Bool {
+        method == "device_info" || (method == "page_source" && params["bundle_id"] as? String == BridgeGuard.springboard)
+    }
+    /// Raw calls other than the guard's own state checks.
+    var actionCalls: [String] { calls.filter { !Self.isProbe($0.method, $0.params) }.map(\.method) }
 
     func call(_ method: String, _ params: BridgeJSON) -> BridgeRawResult {
         calls.append((method, params))
@@ -33,6 +41,7 @@ final class MockRawAPI: BridgeRawAPI {
             if let foreground = foreground { system["foreground_app"] = foreground }
             return .success(["point_width": 393.0, "point_height": 852.0, "system": system])
         }
+        if Self.isProbe(method, params) { return .success(["source": springboardSource]) }
         let result = results[method] ?? .success([:])
         afterCall?(method)
         return result

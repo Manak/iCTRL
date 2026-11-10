@@ -198,7 +198,7 @@ final class BridgeTools {
         }
         return .text(Self.jsonString([
             "allowed_apps": apps,
-            "note": "The home screen is also allowed. The list can only be changed on the phone.",
+            "note": "The home screen and system search are also allowed. The list can only be changed on the phone.",
         ]))
     }
 

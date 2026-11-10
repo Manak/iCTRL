@@ -58,6 +58,14 @@ final class ClaudeBridgeRunner {
             limiter: BridgeRateLimiter(burst: 30, perSecond: 2, clock: clock),
             log: actionLog, clock: clock)
 
+        // On iOS 27 the runner can only name the front app by asking apps it
+        // already knows whether they are in front. Make sure it knows every
+        // app the bridge cares about, so one the owner opened by hand (or the
+        // system search) is recognised instead of reading as "unknown".
+        for app in allowlist.allowedApps + BridgeGuard.systemSurfaces where AppMemory.shared.entry(for: app.bundleID) == nil {
+            AppMemory.shared.recordOpened(bundleId: app.bundleID, name: app.name)
+        }
+
         let secrets = ClaudeBridgeSecretStore.shared
         secrets.ensureSecret()
         let mcp = BridgeMCPServer(auth: BridgePathSecretAuthenticator(secrets: secrets), tools: tools)

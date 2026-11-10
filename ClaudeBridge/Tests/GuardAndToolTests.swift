@@ -11,8 +11,8 @@ final class GuardAndToolTests: XCTestCase {
         let r = h.call("tap", ["x": 10, "y": 20])
         XCTAssertFalse(r.isError)
         XCTAssertEqual(h.raw.actionCalls, ["tap"])
-        XCTAssertEqual(h.raw.calls.first?.method, "device_info", "foreground is checked before acting")
-        XCTAssertEqual(h.raw.calls.last?.method, "device_info", "and again after")
+        // Foreground and home-screen checks run before the action and again after.
+        XCTAssertEqual(h.raw.calls.map(\.method), ["device_info", "page_source", "tap", "device_info", "page_source"])
     }
 
     func testToolsWorkInAllowlistedApp() {
@@ -121,18 +121,92 @@ final class GuardAndToolTests: XCTestCase {
         XCTAssertEqual(lockouts, 2)
     }
 
+    // MARK: Home screen vs other SpringBoard surfaces
+
+    func testAppSwitcherIsNotTheHomeScreen() {
+        let h = Harness()
+        h.raw.springboardSource = MockRawAPI.appSwitcherSource
+        for name in ["screenshot", "read_ui"] {
+            let r = h.call(name)
+            XCTAssertEqual(r.status, .lockedOut, name)
+            XCTAssertFalse(r.content.contains { $0["type"] as? String == "image" })
+        }
+        XCTAssertEqual(h.raw.actionCalls, [])
+        XCTAssertTrue(h.call("phone_status").firstText.contains("locked_out"))
+    }
+
+    func testSpringBoardWithoutIconGridIsNotHome() {
+        let h = Harness()
+        h.raw.springboardSource = "Window, id: 'SBCoverSheetWindow'"
+        XCTAssertEqual(h.call("screenshot").status, .lockedOut)
+    }
+
+    func testActionEndingInAppSwitcherLocksOut() {
+        let h = Harness()
+        h.raw.results["screenshot"] = .success(["data": "QUJD"])
+        h.raw.afterCall = { _ in h.raw.springboardSource = MockRawAPI.appSwitcherSource }
+        let r = h.call("screenshot")
+        XCTAssertEqual(r.status, .lockedOut)
+        XCTAssertFalse(r.content.contains { $0["type"] as? String == "image" })
+    }
+
+    func testSystemSearchIsAllowedLikeHome() {
+        let h = Harness()
+        h.raw.foreground = "com.apple.campo"
+        h.raw.results["page_source"] = .success(["source": "SearchField"])
+        XCTAssertFalse(h.call("read_ui").isError)
+        XCTAssertTrue(h.call("phone_status").firstText.contains("\"state\":\"ready\""))
+        // Allowed to be in front, but not something launch_app will open.
+        XCTAssertEqual(h.call("launch_app", ["bundle_id": "com.apple.campo"]).status, .refused)
+        XCTAssertFalse(h.call("list_allowed_apps").firstText.contains("campo"))
+    }
+
     // MARK: go_home
 
     func testGoHomeWorksDuringLockoutAndClearsIt() {
         let h = Harness()
         h.raw.foreground = safari
         XCTAssertEqual(h.call("tap", ["x": 1, "y": 1]).status, .lockedOut)
-        h.raw.afterCall = { if $0 == "home" { h.raw.foreground = BridgeGuard.springboard } }
+        h.raw.afterCall = { if $0 == "activate_app" { h.raw.foreground = BridgeGuard.springboard } }
         let r = h.call("go_home")
         XCTAssertFalse(r.isError)
-        XCTAssertEqual(h.raw.actionCalls, ["home"])
+        XCTAssertEqual(h.raw.actionCalls, ["activate_app"])
+        let activate = h.raw.calls.first { $0.method == "activate_app" }!
+        XCTAssertEqual(activate.params["bundle_id"] as? String, BridgeGuard.springboard)
         XCTAssertFalse(h.guardian.isLockedOut)
         XCTAssertFalse(h.call("tap", ["x": 1, "y": 1]).isError)
+    }
+
+    func testGoHomeFallsBackToHomeButton() {
+        let h = Harness()
+        h.raw.foreground = safari
+        h.raw.afterCall = { if $0 == "home" { h.raw.foreground = BridgeGuard.springboard } }
+        XCTAssertFalse(h.call("go_home").isError)
+        XCTAssertEqual(h.raw.actionCalls, ["activate_app", "home"])
+    }
+
+    func testGoHomeFromSearchThatWillNotCloseReportsSearch() {
+        let h = Harness()
+        h.raw.foreground = "com.apple.campo"
+        let r = h.call("go_home")
+        XCTAssertFalse(r.isError)
+        XCTAssertTrue(r.firstText.contains("Search is in front"))
+        XCTAssertEqual(h.raw.actionCalls, ["activate_app"])
+    }
+
+    func testGoHomeNeverUsesTheEdgeSwipe() {
+        let h = Harness()
+        h.raw.foreground = safari
+        _ = h.call("go_home")
+        XCTAssertFalse(h.raw.actionCalls.contains("swipe"))
+    }
+
+    func testGoHomeLeavesTheAppSwitcher() {
+        let h = Harness()
+        h.raw.springboardSource = MockRawAPI.appSwitcherSource
+        h.raw.afterCall = { if $0 == "home" { h.raw.springboardSource = "Other, id: 'Home screen icons'" } }
+        XCTAssertFalse(h.call("go_home").isError)
+        XCTAssertFalse(h.guardian.isLockedOut)
     }
 
     func testGoHomeReportsWhenStillBlocked() {
@@ -142,6 +216,12 @@ final class GuardAndToolTests: XCTestCase {
         XCTAssertTrue(r.isError)
         XCTAssertEqual(r.status, .lockedOut)
         XCTAssertFalse(r.allText.contains("com.apple"))
+    }
+
+    func testGoHomeOnHomeScreenPressesNothing() {
+        let h = Harness()
+        XCTAssertFalse(h.call("go_home").isError)
+        XCTAssertEqual(h.raw.actionCalls, [])
     }
 
     // MARK: Phone locked / unverified
