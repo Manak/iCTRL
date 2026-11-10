@@ -62,6 +62,8 @@ final class BridgeGuard {
     static let phoneLockedMessage =
         "phone locked: the lock screen or Notification Centre is showing. The phone's owner must unlock or dismiss it before any action can run."
     /// Sent when an action itself moved the phone somewhere it must not be.
+    static let supersededMessage =
+        "stopped: a newer tool call replaced this one before it finished. Anything it had already done stands; read the screen before continuing."
     static let lockedAfterMessage =
         "locked: the action left a non-allowlisted app in the foreground. Nothing further was read or done. Call go_home."
 
@@ -69,6 +71,9 @@ final class BridgeGuard {
     private let allowlist: BridgeAllowlistProvider
     /// Called on every transition into lockout.
     var onLockout: (() -> Void)?
+    /// Asked once a call gets its turn: true when a newer action call has
+    /// arrived meanwhile, in which case this one does nothing.
+    var isCancelled: (() -> Bool)?
     /// When set, the runner's own inspection of the screen decides which app
     /// is in front, instead of the raw API's `foreground_app`. Arguments are
     /// the screen size in points.
@@ -204,6 +209,7 @@ final class BridgeGuard {
     ///   returning an error result without touching the raw API.
     func guarded(_ body: (BridgeProbe) -> BridgeToolResult) -> BridgeToolResult {
         runLock.lock(); defer { runLock.unlock() }
+        if isCancelled?() == true { return .error(Self.supersededMessage, status: .superseded) }
 
         let before = probe()
         if let refused = refusal(for: before.foreground) { return refused }

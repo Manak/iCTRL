@@ -29,7 +29,7 @@ arguments.
 | `list_allowed_apps` | works | The allowlist. Read-only. |
 | `go_home` | works | Returns to the home screen. The way out of lockout. |
 | `screenshot` | refused | JPEG. At scale 1, pixels equal tap points. |
-| `read_ui` | refused | UI tree with frames. Starts with the scroll position (how far down, how much content above and below). Optional `filter_text`; `include_offscreen` also lists elements loaded beyond the screen edges. |
+| `read_ui` | refused | The whole page by default: every element the app has loaded, on screen or not, with type, label, state and frame. Starts with the scroll position. `visible_only` limits it to the screen; `filter_text` is for re-checking one known element. |
 | `scroll` | refused | Precise scrolling without momentum: `direction` plus `pages` (a fraction of a screen) or `points`; optional `x`,`y` to scroll one area. Reports whether it moved and the new position. |
 | `scroll_to` | refused | Brings an element into view by label or identifier and returns its tap point. |
 | `check_element` | refused | Reports on one element without touching it: found or not, kind and state, on screen or not, whether a tap would reach it, and how far to scroll to centre it. |
@@ -42,6 +42,40 @@ arguments.
 | `open_url` | refused | Only URL schemes and link hosts that belong to an allowlisted app. |
 
 There is no tool that changes the allowlist.
+
+## How Claude is told to use it
+
+The server's instructions and the tool descriptions steer towards:
+
+- **One full `read_ui` before acting.** The default read is the whole page, so
+  a series of actions can be planned from it. Filtered reads hide the context
+  needed to choose the right element (a "contains" search for a dish name
+  matched another dish's description), and screenshots are described as a last
+  resort for pictures or for working out why something failed.
+- **Acting by label** with `tap_element`, checking with `check_element`, and
+  chaining with `run_steps`.
+
+## A new action replaces the one in progress
+
+Action calls are not queued. When a new action call arrives (`tap`,
+`tap_element`, `swipe`, `scroll`, `scroll_to`, `type_text`, `launch_app`,
+`open_url`, `go_home`, `run_steps`) while another is still running:
+
+- the running call stops at its next step and returns `stopped: a newer tool
+  call replaced this one…`, listing the steps it completed. What it had
+  already done on the phone stands; nothing is undone;
+- an action that was itself still waiting when a newer one arrived does
+  nothing at all;
+- the newest call then runs.
+
+Read-only calls (`read_ui`, `screenshot`, `check_element`, `phone_status`,
+`list_allowed_apps`) never stop anything and are never stopped; they wait
+their turn. A step that is mid-gesture finishes that gesture first, so the
+stop takes effect within a few seconds, not instantly.
+
+The instructions tell Claude this, and to wait for an action's result before
+sending the next unless it means to replace it. Note for clients that send
+several tool calls at once: two actions sent together will not both run.
 
 ## Rules enforced
 

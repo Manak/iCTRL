@@ -553,16 +553,31 @@ final class GuardAndToolTests: XCTestCase {
         XCTAssertTrue(bottom.contains("At the bottom"))
     }
 
-    func testReadUICanIncludeOffscreenElements() {
-        let h = Harness()
-        h.raw.foreground = whatsApp
-        _ = h.call("read_ui")
-        XCTAssertEqual(h.raw.calls.first { $0.method == "page_source" && $0.params["bundle_id"] as? String != BridgeGuard.springboard }!.params["visible_only"] as? Bool, true)
-        let h2 = Harness()
-        h2.raw.foreground = whatsApp
-        let text = h2.call("read_ui", ["include_offscreen": true]).firstText
-        XCTAssertEqual(h2.raw.calls.first { $0.method == "page_source" && $0.params["bundle_id"] as? String != BridgeGuard.springboard }!.params["visible_only"] as? Bool, false)
-        XCTAssertTrue(text.contains("Off-screen elements are included"))
+    func testReadUIReadsTheWholePageByDefault() {
+        func readParams(_ args: BridgeJSON) -> (BridgeJSON, String) {
+            let h = Harness()
+            h.raw.foreground = whatsApp
+            let text = h.call("read_ui", args).firstText
+            return (h.raw.calls.first { $0.method == "page_source" && $0.params["bundle_id"] as? String != BridgeGuard.springboard }!.params, text)
+        }
+        let (full, fullText) = readParams([:])
+        XCTAssertEqual(full["visible_only"] as? Bool, false, "the default is the whole page")
+        XCTAssertTrue(fullText.contains("Off-screen elements are included"))
+        let (visible, visibleText) = readParams(["visible_only": true])
+        XCTAssertEqual(visible["visible_only"] as? Bool, true)
+        XCTAssertFalse(visibleText.contains("Off-screen elements are included"))
+        // The old argument name still works.
+        XCTAssertEqual(readParams(["include_offscreen": false]).0["visible_only"] as? Bool, true)
+    }
+
+    func testGuidanceSteersToFullReads() {
+        let read = BridgeTools.definitions.first { $0.name == "read_ui" }!
+        XCTAssertTrue(read.description.contains("whole page"))
+        XCTAssertTrue(read.description.contains("Avoid filter_text"))
+        let shot = BridgeTools.definitions.first { $0.name == "screenshot" }!
+        XCTAssertTrue(shot.description.contains("last resort"))
+        XCTAssertTrue(BridgeMCPServer.instructions.contains("read the whole page"))
+        XCTAssertTrue(BridgeMCPServer.instructions.contains("stops the action still in progress"))
     }
 
     func testScrollByPagesUsesDevicePagingAndReportsTheEnd() {
@@ -1070,5 +1085,97 @@ final class GuardAndToolTests: XCTestCase {
         XCTAssertEqual(h.call("run_steps", ["steps": [["tool": "wait", "seconds": 60]]]).status, .refused)
         XCTAssertEqual(h.call("run_steps", ["steps": Array(repeating: ["tool": "tap", "x": 1, "y": 1], count: 11)]).status, .refused)
         XCTAssertEqual(h.raw.calls.count, 0)
+    }
+
+    // MARK: A new action replaces the one in progress
+
+    /// Runs `first` on another thread, holds it inside its first raw `tap`,
+    /// sends `second` meanwhile, then lets the first continue.
+    private func race(_ h: Harness, first: @escaping () -> BridgeToolResult, second: @escaping () -> BridgeToolResult) -> (BridgeToolResult, BridgeToolResult) {
+        let inFirstTap = DispatchSemaphore(value: 0), proceed = DispatchSemaphore(value: 0)
+        var held = false
+        h.raw.afterCall = { method in
+            if method == "tap", !held {
+                held = true
+                inFirstTap.signal()
+                proceed.wait()
+            }
+        }
+        var r1: BridgeToolResult!, r2: BridgeToolResult!
+        let group = DispatchGroup()
+        DispatchQueue.global().async(group: group) { r1 = first() }
+        inFirstTap.wait()
+        let before = h.tools.actionCallCount
+        DispatchQueue.global().async(group: group) { r2 = second() }
+        // Wait until the second call has announced itself, then release the first.
+        while h.tools.actionCallCount == before { usleep(1000) }
+        proceed.signal()
+        group.wait()
+        return (r1, r2)
+    }
+
+    func testNewActionStopsAChainInProgress() {
+        let h = Harness()
+        h.raw.foreground = whatsApp
+        let chain: BridgeJSON = ["steps": [["tool": "tap", "x": 1, "y": 1], ["tool": "tap", "x": 2, "y": 2], ["tool": "tap", "x": 3, "y": 3]]]
+        let (first, second) = race(h, first: { h.call("run_steps", chain) }, second: { h.call("tap", ["x": 9, "y": 9]) })
+        XCTAssertTrue(first.isError)
+        XCTAssertEqual(first.status, .superseded)
+        XCTAssertTrue(first.firstText.contains("1. tap: done"), first.firstText)
+        XCTAssertTrue(first.firstText.contains("Stopped before step 2"), first.firstText)
+        XCTAssertFalse(second.isError)
+        // Step 1 of the chain, then the new tap. Steps 2 and 3 never ran.
+        let taps = h.raw.calls.filter { $0.method == "tap" }.map { Int($0.params["x"] as! Double) }
+        XCTAssertEqual(taps, [1, 9])
+    }
+
+    func testReadOnlyCallsDoNotStopAnything() {
+        let h = Harness()
+        h.raw.foreground = whatsApp
+        let chain: BridgeJSON = ["steps": [["tool": "tap", "x": 1, "y": 1], ["tool": "tap", "x": 2, "y": 2]]]
+        let inFirstTap = DispatchSemaphore(value: 0), proceed = DispatchSemaphore(value: 0)
+        var held = false
+        h.raw.afterCall = { if $0 == "tap", !held { held = true; inFirstTap.signal(); proceed.wait() } }
+        var result: BridgeToolResult!
+        let group = DispatchGroup()
+        DispatchQueue.global().async(group: group) { result = h.call("run_steps", chain) }
+        inFirstTap.wait()
+        // list_allowed_apps and phone_status-like reads are not actions.
+        XCTAssertFalse(h.call("list_allowed_apps").isError)
+        DispatchQueue.global().async(group: group) { _ = h.call("read_ui") }
+        usleep(20_000)
+        proceed.signal()
+        group.wait()
+        XCTAssertFalse(result.isError, result.firstText)
+        XCTAssertEqual(h.raw.calls.filter { $0.method == "tap" }.count, 2, "the chain ran to the end")
+    }
+
+    func testAnActionReplacedWhileWaitingDoesNothing() {
+        // Two actions arrive while a third is running: only the newest runs.
+        let h = Harness()
+        h.raw.foreground = whatsApp
+        let inFirstTap = DispatchSemaphore(value: 0), proceed = DispatchSemaphore(value: 0)
+        var held = false
+        h.raw.afterCall = { if $0 == "tap", !held { held = true; inFirstTap.signal(); proceed.wait() } }
+        var middle: BridgeToolResult!, last: BridgeToolResult!
+        let group = DispatchGroup()
+        DispatchQueue.global().async(group: group) { _ = h.call("tap", ["x": 1, "y": 1]) }
+        inFirstTap.wait()
+        DispatchQueue.global().async(group: group) { middle = h.call("tap", ["x": 2, "y": 2]) }
+        while h.tools.actionCallCount < 2 { usleep(1000) }
+        DispatchQueue.global().async(group: group) { last = h.call("tap", ["x": 3, "y": 3]) }
+        while h.tools.actionCallCount < 3 { usleep(1000) }
+        proceed.signal()
+        group.wait()
+        XCTAssertEqual(middle.status, .superseded)
+        XCTAssertFalse(last.isError)
+        XCTAssertEqual(h.raw.calls.filter { $0.method == "tap" }.map { Int($0.params["x"] as! Double) }, [1, 3])
+    }
+
+    func testSequentialActionsAreUnaffected() {
+        let h = Harness()
+        h.raw.foreground = whatsApp
+        for x in 1...3 { XCTAssertFalse(h.call("tap", ["x": x, "y": 1]).isError) }
+        XCTAssertEqual(h.log.all.map(\.status), [.ok, .ok, .ok])
     }
 }

@@ -61,6 +61,7 @@ final class BridgeTools {
         self.limiter = limiter
         self.log = log
         self.clock = clock
+        guardian.isCancelled = { [weak self] in self?.isSuperseded ?? false }
     }
 
     // MARK: Definitions
@@ -76,16 +77,16 @@ final class BridgeTools {
             properties: [:], required: [], readOnly: true),
         Definition(
             name: "screenshot", title: "Screenshot",
-            description: "Capture the screen as a JPEG. Only while an allowed app or the home screen is in front. At the default scale of 1, image pixels equal tap points. Prefer read_ui for text: it is smaller and gives exact element frames.",
+            description: "Capture the screen as a JPEG. A last resort: use read_ui first, which is exact, cheaper and shows state. Take a screenshot only for something read_ui cannot give you (a picture, a map, a drawn layout) or to work out why an action did not do what you expected. At the default scale of 1, image pixels equal tap points.",
             properties: [
                 "scale": ["type": "number", "enum": [1, 2], "description": "Pixels per point. 1 (default): pixel coordinates are tap coordinates. 2: sharper; divide pixel coordinates by 2 before tapping."] as BridgeJSON,
             ], required: [], readOnly: true),
         Definition(
             name: "read_ui", title: "Read UI",
-            description: "Read the UI as a text tree: element types, labels and frames in points. The first line reports the scroll position: whether there is more content above or below. By default only what is on screen is listed; set include_offscreen to also list elements the app has loaded beyond the screen edges (their frames lie outside the screen; scroll before tapping them). Tap an element at the centre of its frame.",
+            description: "Read the whole page as a text tree: every element the app has loaded, on screen or not, with its type, label, state and frame in points. This is the way to look at the phone: do one full read before acting, and plan from it. The first line gives the scroll position. Words before a frame describe the element: tappable, disabled, selected. Elements outside the screen must be reached with tap_element or scroll_to, not by their coordinates. Avoid filter_text unless you only need to re-check one thing you already know is there: a filtered read hides the context you need to choose correctly.",
             properties: [
-                "filter_text": ["type": "string", "description": "Return only elements whose label, value or identifier contains this text (case-insensitive), with their ancestors."] as BridgeJSON,
-                "include_offscreen": ["type": "boolean", "description": "Also list elements outside the visible area (default false). Larger and slower on long lists."] as BridgeJSON,
+                "visible_only": ["type": "boolean", "description": "Only what is on screen right now (default false: the whole page)."] as BridgeJSON,
+                "filter_text": ["type": "string", "description": "Return only elements whose label, value or identifier contains this text, with their ancestors. For re-checking a known element, not for exploring."] as BridgeJSON,
             ], required: [], readOnly: true),
         Definition(
             name: "scroll", title: "Scroll",
@@ -107,7 +108,7 @@ final class BridgeTools {
             ], required: ["text"], readOnly: false),
         Definition(
             name: "run_steps", title: "Run steps",
-            description: "Run several actions one after another in a single call, to save round trips: for example scroll to one element, tap it, then tap another. Each step is an object with a 'tool' name and that tool's arguments. Allowed tools: tap_element, scroll_to, tap, scroll, swipe, type_text, check_element, and wait (with 'seconds', up to 3). Steps run in order and stop at the first one that fails; every step is checked against the allowlist like a separate call. Up to 10 steps.",
+            description: "Run several actions one after another in a single call, to save round trips (a newer action call stops a chain that is still running): for example scroll to one element, tap it, then tap another. Each step is an object with a 'tool' name and that tool's arguments. Allowed tools: tap_element, scroll_to, tap, scroll, swipe, type_text, check_element, and wait (with 'seconds', up to 3). Steps run in order and stop at the first one that fails; every step is checked against the allowlist like a separate call. Up to 10 steps.",
             properties: [
                 "steps": [
                     "type": "array",
@@ -179,8 +180,41 @@ final class BridgeTools {
     // MARK: Dispatch
 
     /// Runs one tool call. Returns nil for an unknown tool name.
+    /// Tools that act on the phone. A new call to one of these stops whichever
+    /// call is still in progress: calls are not queued up behind each other.
+    /// Read-only tools neither stop anything nor get stopped mid-read.
+    static let actionTools: Set<String> = [
+        "tap", "tap_element", "swipe", "scroll", "scroll_to", "type_text", "launch_app", "open_url", "go_home", "run_steps",
+    ]
+    private static let generationKey = "claude-bridge.generation"
+    private let generationLock = NSLock()
+    private var latestAction = 0
+
+    /// Number of action calls received so far (for tests).
+    var actionCallCount: Int {
+        generationLock.lock(); defer { generationLock.unlock() }
+        return latestAction
+    }
+
+    /// True on the thread of an action call that a newer one has replaced.
+    var isSuperseded: Bool {
+        guard let mine = Thread.current.threadDictionary[Self.generationKey] as? Int else { return false }
+        generationLock.lock(); defer { generationLock.unlock() }
+        return latestAction > mine
+    }
+
     func call(_ name: String, _ args: BridgeJSON) -> BridgeToolResult? {
         guard Self.toolNames.contains(name) else { return nil }
+        if Self.actionTools.contains(name) {
+            // Announce this call at once, before waiting for its turn, so the
+            // call in progress sees it at its next step and stops.
+            generationLock.lock()
+            latestAction += 1
+            let mine = latestAction
+            generationLock.unlock()
+            Thread.current.threadDictionary[Self.generationKey] = mine
+        }
+        defer { Thread.current.threadDictionary.removeObject(forKey: Self.generationKey) }
         let result: BridgeToolResult
         if !limiter.allow() {
             result = .error("rate limited: too many tool calls. Wait a few seconds and continue.", status: .rateLimited)
@@ -283,8 +317,12 @@ final class BridgeTools {
     }
 
     private func readUI(_ args: BridgeJSON) -> BridgeToolResult {
-        let offscreen = args["include_offscreen"] as? Bool ?? false
-        // On-screen only by default: long lists keep hundreds of rows loaded.
+        // The whole page by default: everything the app has loaded, on screen
+        // or not, so one read is enough to plan a series of actions.
+        // `visible_only` narrows it. (`include_offscreen` is the old name.)
+        var offscreen = true
+        if let visibleOnly = args["visible_only"] as? Bool { offscreen = !visibleOnly }
+        else if let include = args["include_offscreen"] as? Bool { offscreen = include }
         // The child limit applies before the on-screen filter, so it has to
         // be generous: at 50, rows past the 50th never showed up, even when
         // they were the ones on screen.
@@ -434,7 +472,7 @@ final class BridgeTools {
         return guardian.guarded { probe in
             switch self.bringIntoView(target, probe: probe) {
             case .failure(let why):
-                return .error("scroll_to: \(why.message)")
+                return .error("scroll_to: \(why.message)", status: why.superseded ? .superseded : .error)
             case .success(let found):
                 return .text("scroll_to: the element is in view. Tap it at x=\(Int(found.x.rounded())), y=\(Int(found.y.rounded())), or use tap_element. Scrolled \(found.scrolls) time(s).")
             }
@@ -446,7 +484,7 @@ final class BridgeTools {
         return guardian.guarded { probe in
             switch self.bringIntoView(target, probe: probe) {
             case .failure(let why):
-                return .error("tap_element: \(why.message)")
+                return .error("tap_element: \(why.message)", status: why.superseded ? .superseded : .error)
             case .success(let found):
                 if case .failure(let message) = self.raw.call("tap", ["x": found.x, "y": found.y]) {
                     return .error(self.quoted("tap_element: found it, but the tap failed", message))
@@ -483,6 +521,12 @@ final class BridgeTools {
         var status = BridgeLogEntry.Status.ok
         var failed = false
         for (i, step) in steps.enumerated() {
+            if isSuperseded {
+                failed = true
+                status = .superseded
+                lines.append("Stopped before step \(i + 1): a newer tool call replaced this one. Steps \(i + 1) to \(steps.count) were not run.")
+                break
+            }
             let tool = step["tool"] as! String
             if tool == "wait" {
                 sleep(Self.number(step["seconds"]) ?? 0)
@@ -585,7 +629,10 @@ final class BridgeTools {
         let scrolls: Int
     }
 
-    struct ElementError: Error { let message: String }
+    struct ElementError: Error {
+        let message: String
+        var superseded = false
+    }
 
     private static func elementTarget(_ args: BridgeJSON) -> ElementTarget? {
         guard let text = args["text"] as? String, !text.isEmpty, text.count <= 200 else { return nil }
@@ -677,6 +724,7 @@ final class BridgeTools {
         let notFound = ElementError(message: "no element with that text was found, even after scrolling. Check the label with read_ui, or try match: contains.")
 
         for _ in 0..<Self.maxScrollSteps {
+            if isSuperseded { return .failure(ElementError(message: BridgeGuard.supersededMessage, superseded: true)) }
             guard case .success(let page) = raw.call("page_source", Self.pageParams(["visible_only": false, "max_children": 400], probe)),
                   let source = page["source"] as? String else {
                 return .failure(ElementError(message: "the screen could not be read."))

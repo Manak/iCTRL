@@ -171,6 +171,8 @@ struct BridgeLogEntry: Equatable {
         case lockedOut = "locked_out"
         case phoneLocked = "phone_locked"
         case rateLimited = "rate_limited"
+        /// Stopped because a newer action call took over.
+        case superseded
     }
     let time: Date
     let tool: String
