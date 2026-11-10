@@ -562,7 +562,7 @@ final class GuardAndToolTests: XCTestCase {
         }
         let (full, fullText) = readParams([:])
         XCTAssertEqual(full["visible_only"] as? Bool, false, "the default is the whole page")
-        XCTAssertTrue(fullText.contains("Off-screen elements are included"))
+        XCTAssertTrue(fullText.contains("Whole page"))
         let (visible, visibleText) = readParams(["visible_only": true])
         XCTAssertEqual(visible["visible_only"] as? Bool, true)
         XCTAssertFalse(visibleText.contains("Off-screen elements are included"))
@@ -816,9 +816,8 @@ final class GuardAndToolTests: XCTestCase {
         let h = Harness()
         _ = scrollingMenu(h)
         let text = h.call("read_ui").firstText
-        XCTAssertTrue(text.contains("converted to screen points"))
         // 375 x 667 at scale 393/375 is 393 x 699.
-        XCTAssertTrue(text.contains("Application, label: 'Shop', {{0, 0}, {393, 699}}"), text)
+        XCTAssertTrue(text.contains("Application 'Shop' 0,0,393,699"), text)
     }
 
     func testVerticalScrollByPointsUsesDevicePaging() {
@@ -891,7 +890,7 @@ final class GuardAndToolTests: XCTestCase {
         h.raw.results["page_source"] = .success(["source": "Application, label: 'Shop', {{0, 0}, {375, 667}}\n  Button, label: 'Buy', {{0, 0}, {100, 50}}"])
         let text = h.call("read_ui").firstText
         // Stage scale 393/786 = 0.5: the button is at (100, 250), 50 x 25.
-        XCTAssertTrue(text.contains("Button, label: 'Buy', tappable, {{100, 250}, {50, 25}}"), text)
+        XCTAssertTrue(text.contains("B 'Buy' * 100,250,50,25"), text)
     }
 
     func testCoordinateMapFromAMeasuredWindow() {
@@ -918,7 +917,7 @@ final class GuardAndToolTests: XCTestCase {
         let text = h.call("read_ui").firstText
         let read = h.raw.calls.first { $0.method == "page_source" && $0.params["bundle_id"] as? String != BridgeGuard.springboard }!
         XCTAssertEqual(read.params["bundle_id"] as? String, "com.example.shop", "the app is named explicitly")
-        XCTAssertTrue(text.contains("Button, label: 'Buy', tappable, {{114, 122}, {28, 28}}"), text)
+        XCTAssertTrue(text.contains("B 'Buy' * 114,122,28,28"), text)
         XCTAssertTrue(h.call("phone_status").firstText.contains("Shop"))
 
         // And when the inspector cannot vouch for the screen, it is a lockout.
@@ -1244,5 +1243,72 @@ final class GuardAndToolTests: XCTestCase {
         h.raw.foreground = whatsApp
         h.raw.results["page_source"] = .success(["source": "Application, label: 'A', {{0, 0}, {393, 852}}", "truncated": true])
         XCTAssertTrue(h.call("read_ui").firstText.contains("the end of it is missing"))
+    }
+
+    // MARK: Shorthand
+
+    private func shorthand(_ lines: [String]) -> BridgeShorthand.Output {
+        BridgeShorthand.encode(lines.joined(separator: "\n"), screenWidth: 393, screenHeight: 852)
+    }
+
+    func testShorthandShortensSystemTextAndKeepsScreenText() {
+        let out = shorthand([
+            "Application, label: 'A', {{0, 0}, {393, 852}}",
+            "  Button, label: 'It's odd, here', id: 'add_button', disabled, {{16, 700}, {360, 56}}",
+            "  Switch, value: '1', {{0, 60}, {90, 40}}",
+            "  Other, id: 'tab_home', selected, {{0, 100}, {90, 40}}",
+            "  PageIndicator, value: 'page 1 of 3', {{0, 150}, {90, 40}}",
+        ])
+        XCTAssertEqual(out.lines, [
+            "Application 'A' 0,0,393,852",
+            " B 'It's odd, here' #add_button dis 16,700,360,56",
+            " S ='1' * 0,60,90,40",
+            " O #tab_home * sel 0,100,90,40",
+            " PageIndicator ='page 1 of 3' 0,150,90,40",
+        ])
+        XCTAssertNil(out.identifierLine(for: 0..<out.lines.count))
+    }
+
+    func testShorthandNumbersRepeatedIdentifiers() {
+        var lines = ["Application, label: 'A', {{0, 0}, {393, 852}}"]
+        for i in 0..<4 { lines.append("  StaticText, label: 'Row \(i)', id: 'row_heading', {{0, \(i * 40)}, {393, 40}}") }
+        lines.append("  StaticText, label: 'Total', id: 'total_text', {{0, 400}, {393, 40}}")
+        let out = shorthand(lines)
+        XCTAssertEqual(out.lines[1], " T 'Row 0' $1 0,0,393,40")
+        XCTAssertEqual(out.lines[5], " T 'Total' #total_text 0,400,393,40")
+        XCTAssertEqual(out.identifierLine(for: 0..<6), "ids: $1=row_heading")
+        XCTAssertNil(out.identifierLine(for: 5..<6), "only the numbers a page uses are listed")
+    }
+
+    func testShorthandFramesSayWhereAnElementIs() {
+        let out = shorthand([
+            "Application, label: 'A', {{0, 0}, {393, 852}}",
+            "  Cell, id: 'near', {{0, 900}, {393, 100}}",
+            "    StaticText, label: 'Real frame', {{20, 910}, {100, 20}}",
+            "    StaticText, label: 'Row origin', {{0, 900}, {100, 20}}",
+            "    StaticText, {{0, 900}, {0, 0}}",
+            "    Image, {{20, 940}, {30, 30}}",
+        ])
+        XCTAssertEqual(out.lines, [
+            "Application 'A' 0,0,393,852",
+            " C #near * ~197,950",
+            "  T 'Real frame' ~70,920",
+            "  T 'Row origin'",
+        ])
+        XCTAssertEqual(out.dropped, 2, "text and images with nothing to say are left out")
+    }
+
+    func testReadUIUsesShorthandAndExplainsIt() {
+        let h = Harness()
+        h.raw.results["page_source"] = .success(["source": [
+            "Application, label: 'A', {{0, 0}, {393, 852}}",
+            "  Button, label: 'Buy', id: 'buy', {{0, 0}, {50, 50}}",
+            "  Button, label: 'Buy 2', id: 'buy', {{0, 60}, {50, 50}}",
+            "  Button, label: 'Buy 3', id: 'buy', {{0, 120}, {50, 50}}",
+        ].joined(separator: "\n")])
+        let text = h.call("read_ui").firstText
+        XCTAssertTrue(text.contains("ids: $1=buy\nApplication 'A' 0,0,393,852\n B 'Buy' $1 * 0,0,50,50"), text)
+        XCTAssertTrue(text.contains("Each line: TYPE 'label' ='value' #identifier flags frame"), text)
+        XCTAssertFalse(text.contains("{{"), text)
     }
 }

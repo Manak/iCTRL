@@ -371,3 +371,21 @@ Diagnostics for this work are behind environment variables:
 `ICTRL_BRIDGE_DIAG=1` (front app, lock flag, SpringBoard ids, the foreground
 decision's inputs), `ICTRL_BRIDGE_DIAG_APPS=1` (per-app state and pid),
 `ICTRL_BRIDGE_DIAG_TREES=1` (candidate window frames in SpringBoard's tree).
+
+## read_ui shorthand
+
+`read_ui` returns the tree in a short notation (`ClaudeBridge/Core/BridgeShorthand.swift`).
+Only the system-written parts are shortened; labels and values from the screen are untouched.
+
+    <indent>TYPE 'label' ='value' #identifier flags frame
+
+- Types: `T` text, `B` button, `I` image, `C` cell, `O` other, `L` link, `F` text field, `S` switch; others spelled out.
+- An identifier used three or more times is listed once in the `ids:` line and written `$n`.
+- Flags: `*` probably tappable, `dis` disabled, `sel` selected.
+- Frame `x,y,w,h`: on screen, in screen points. `~x,y`: rough centre of something off screen.
+  No frame: off screen with its parent.
+- Text and image elements with no label, value or identifier are left out, like unnamed containers.
+
+Measured on a long Grab menu (3,995 elements): 308,000 characters over six results before,
+93,000 over two after. The bridge's own finding, scrolling and tapping still work from the
+device's full text, so nothing is lost for `tap_element`, `scroll_to` or `check_element`.

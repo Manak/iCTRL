@@ -87,7 +87,7 @@ final class BridgeTools {
             ], required: [], readOnly: true),
         Definition(
             name: "read_ui", title: "Read UI",
-            description: "Read the whole page as a text tree: every element the app has loaded, on screen or not, with its type, label, state and frame in points. This is the way to look at the phone: do one full read before acting, and plan from it. The first line gives the scroll position. Words before a frame describe the element: tappable, disabled, selected. Elements outside the screen must be reached with tap_element or scroll_to, not by their coordinates. Avoid filter_text unless you only need to re-check one thing you already know is there: a filtered read hides the context you need to choose correctly.",
+            description: "Read the whole page as a text tree: every element the app has loaded, on screen or not, in a short notation. Each line is: TYPE 'label' ='value' #identifier flags frame. Types: \(BridgeShorthand.typeLegend). An identifier used many times is listed once in the ids line and written $n. Flags: * probably tappable, dis disabled, sel selected. A frame x,y,w,h is in screen points and means the element is on screen; ~x,y is the rough centre of an element that is off screen; no frame means off screen with its parent. This is the way to look at the phone: do one full read before acting, and plan from it. The first line of the result gives the scroll position. Elements off screen must be reached with tap_element or scroll_to and their label, not by coordinates. Avoid filter_text unless you only need to re-check one thing you already know is there: a filtered read hides the context you need to choose correctly.",
             properties: [
                 "visible_only": ["type": "boolean", "description": "Only what is on screen right now (default false: the whole page)."] as BridgeJSON,
                 "filter_text": ["type": "string", "description": "Return only elements whose label, value or identifier contains this text, with their ancestors. For re-checking a known element, not for exploring."] as BridgeJSON,
@@ -353,16 +353,22 @@ final class BridgeTools {
                 // Drop the unnamed containers, then return as much as fits;
                 // the rest is fetched with start_at rather than cut off.
                 let compacted = BridgeTreeCompactor.compact(annotated)
-                let all = compacted.lines
+                // Shorten the system-written parts of each line; the
+                // screen's own text is left as it is.
+                let short = BridgeShorthand.encode(compacted.lines.joined(separator: "\n"),
+                                                   screenWidth: probe.pointWidth, screenHeight: probe.pointHeight)
+                let all = short.lines
                 var shown: [String] = []
                 var used = 0
-                var next = min(startAt, all.count)
+                let first = min(startAt, all.count)
+                var next = first
                 while next < all.count, used + all[next].count + 1 <= Self.maxUITextLength || shown.isEmpty {
                     shown.append(all[next])
                     used += all[next].count + 1
                     next += 1
                 }
                 var text = shown.joined(separator: "\n")
+                if let ids = short.identifierLine(for: first..<next) { text = ids + "\n" + text }
                 if let ocr = page["ocr_items"] as? [Any], !ocr.isEmpty, next >= all.count {
                     text += "\n\n[text read by OCR, with tap points]\n" + Self.jsonString(ocr)
                 }
@@ -370,24 +376,30 @@ final class BridgeTools {
                 var notes = [Self.scrollSummary(page["scroll_position"])]
                 self.lastScrolledPt = (page["scroll_position"] as? BridgeJSON).flatMap { Self.number($0["scrolled_pt"]) }
                 if startAt > 0 || next < all.count {
-                    var part = "This is elements \(min(startAt, all.count) + 1) to \(next) of \(all.count)."
+                    var part = "This is elements \(first + 1) to \(next) of \(all.count)."
                     if next < all.count { part += " There is more: call read_ui again with start_at: \(next) for the rest." }
                     notes.append(part)
                 }
                 if (page["truncated"] as? Bool) == true {
                     notes.append("The page has more elements than the device will list in one go (\(Self.maxElements)), so the end of it is missing. Scroll further down and read again, or use visible_only.")
                 }
-                if !map.isIdentity {
-                    notes.append("This app is shown scaled or in a window; the frames below have been converted to screen points and can be tapped as they are.")
-                }
-                if offscreen {
-                    notes.append("Off-screen elements are included: the screen is \(Int(probe.pointWidth)) x \(Int(probe.pointHeight)) points. Frames of things inside off-screen rows can be wrong; act on those with tap_element or scroll_to and their label, not their coordinates.")
-                }
-                notes.append("Words before a frame: tappable = probably responds to a tap (a hint from its type or identifier, not a guarantee); disabled = greyed out by the app; selected = the active one of a set. Unnamed containers are left out (\(compacted.dropped) here).")
-                let heading = (offscreen ? "Whole page" : "Visible UI") + ", frames in points"
+                notes.append(Self.shorthandLegend(screenWidth: Int(probe.pointWidth), screenHeight: Int(probe.pointHeight),
+                                                  leftOut: compacted.dropped + short.dropped))
+                let heading = offscreen ? "Whole page" : "Visible UI"
                 return .text(notes.joined(separator: "\n") + "\n\n" + self.quoted(heading, text))
             }
         }
+    }
+
+    /// How to read a line of read_ui output. Kept to one short paragraph: it
+    /// is sent with every result.
+    static func shorthandLegend(screenWidth: Int, screenHeight: Int, leftOut: Int) -> String {
+        "Each line: TYPE 'label' ='value' #identifier flags frame. Types: \(BridgeShorthand.typeLegend). "
+            + "$n is an identifier from the ids line. Flags: * probably tappable (a hint), dis disabled, sel selected. "
+            + "Frame x,y,w,h in screen points (screen \(screenWidth)x\(screenHeight)) means on screen and tappable there; "
+            + "~x,y is the rough centre of something off screen; no frame means off screen with its parent. "
+            + "Reach anything off screen with tap_element or scroll_to and its label. "
+            + "Left out: \(leftOut) unnamed containers and empty elements."
     }
 
     /// One line on where the view is scrolled to, from the device's own
