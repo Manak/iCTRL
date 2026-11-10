@@ -29,9 +29,11 @@ arguments.
 | `list_allowed_apps` | works | The allowlist. Read-only. |
 | `go_home` | works | Returns to the home screen. The way out of lockout. |
 | `screenshot` | refused | JPEG. At scale 1, pixels equal tap points. |
-| `read_ui` | refused | Visible UI tree with frames, optional `filter_text`. |
+| `read_ui` | refused | UI tree with frames. Starts with the scroll position (how far down, how much content above and below). Optional `filter_text`; `include_offscreen` also lists elements loaded beyond the screen edges. |
+| `scroll` | refused | Precise scrolling without momentum: `direction` plus `pages` (a fraction of a screen) or `points`; optional `x`,`y` to scroll one area. Reports whether it moved and the new position. |
+| `scroll_to` | refused | Scrolls until an element with a given label is in view and returns its tap point. |
 | `tap` | refused | x, y in points. |
-| `swipe` | refused | Refuses starts within 40 pt of the top edge or 50 pt of the bottom edge (system gestures). |
+| `swipe` | refused | Low-level gesture (pull to refresh, swipe a row). Refuses starts within 40 pt of the top edge or 50 pt of the bottom edge (system gestures). |
 | `type_text` | refused | Refused in apps marked read-only. |
 | `launch_app` | refused | Allowlisted bundle ids only. |
 | `open_url` | refused | Only URL schemes and link hosts that belong to an allowlisted app. |

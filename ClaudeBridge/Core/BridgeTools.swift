@@ -82,10 +82,28 @@ final class BridgeTools {
             ], required: [], readOnly: true),
         Definition(
             name: "read_ui", title: "Read UI",
-            description: "Read the visible UI as a text tree: element types, labels and frames in points. Only while an allowed app or the home screen is in front. Tap an element at the centre of its frame.",
+            description: "Read the UI as a text tree: element types, labels and frames in points. The first line reports the scroll position: whether there is more content above or below. By default only what is on screen is listed; set include_offscreen to also list elements the app has loaded beyond the screen edges (their frames lie outside the screen; scroll before tapping them). Tap an element at the centre of its frame.",
             properties: [
                 "filter_text": ["type": "string", "description": "Return only elements whose label, value or identifier contains this text (case-insensitive), with their ancestors."] as BridgeJSON,
+                "include_offscreen": ["type": "boolean", "description": "Also list elements outside the visible area (default false). Larger and slower on long lists."] as BridgeJSON,
             ], required: [], readOnly: true),
+        Definition(
+            name: "scroll", title: "Scroll",
+            description: "Scroll the content precisely, without momentum. direction is where you want to look: 'down' shows content further down. Give either pages (a fraction of a screen, default 1; one page overlaps the previous view by a third) or points (an exact distance). The result says whether anything moved and where you now are; 'did not move' means you are at the end. Use x,y to scroll a specific area, such as a horizontal row.",
+            properties: [
+                "direction": ["type": "string", "enum": ["down", "up", "left", "right"]] as BridgeJSON,
+                "pages": ["type": "number", "description": "Screens to move, 0.1 to 3 (default 1). Ignored when points is given."] as BridgeJSON,
+                "points": ["type": "number", "description": "Exact distance in points, 10 to 2000."] as BridgeJSON,
+                "x": ["type": "number", "description": "X of the area to scroll (default: screen centre)."] as BridgeJSON,
+                "y": ["type": "number", "description": "Y of the area to scroll (default: screen centre)."] as BridgeJSON,
+            ], required: ["direction"], readOnly: false),
+        Definition(
+            name: "scroll_to", title: "Scroll to element",
+            description: "Scroll until an element with this label or identifier is in view, then return its tap point. Works for elements that are off screen, including ones not loaded yet. Use the label as it appears in read_ui.",
+            properties: [
+                "text": ["type": "string", "description": "The element's label or identifier."] as BridgeJSON,
+                "match": ["type": "string", "enum": ["exact", "contains"], "description": "Default exact."] as BridgeJSON,
+            ], required: ["text"], readOnly: false),
         Definition(
             name: "tap", title: "Tap",
             description: "Tap at x,y in points. Only while an allowed app or the home screen is in front.",
@@ -95,7 +113,7 @@ final class BridgeTools {
             ], required: ["x", "y"], readOnly: false),
         Definition(
             name: "swipe", title: "Swipe",
-            description: "Swipe one finger from a start point. direction is the way the finger moves: 'up' reveals content further down. Swipes that start at the very top or bottom edge are refused, because iOS treats them as system gestures.",
+            description: "Low-level one-finger swipe, for gestures such as pull-to-refresh or swiping a row aside. To move through content use scroll instead. direction is the way the finger moves: 'up' reveals content further down. Swipes that start at the very top or bottom edge are refused, because iOS treats them as system gestures.",
             properties: [
                 "direction": ["type": "string", "enum": ["up", "down", "left", "right"]] as BridgeJSON,
                 "x": ["type": "number", "description": "Start X in points (default: screen centre)."] as BridgeJSON,
@@ -154,6 +172,8 @@ final class BridgeTools {
         case "read_ui": return readUI(args)
         case "tap": return tap(args)
         case "swipe": return swipe(args)
+        case "scroll": return scroll(args)
+        case "scroll_to": return scrollTo(args)
         case "type_text": return typeText(args)
         case "launch_app": return launchApp(args)
         case "open_url": return openURL(args)
@@ -232,11 +252,15 @@ final class BridgeTools {
     }
 
     private func readUI(_ args: BridgeJSON) -> BridgeToolResult {
-        var params: BridgeJSON = ["visible_only": true, "max_children": 50]
+        let offscreen = args["include_offscreen"] as? Bool ?? false
+        // On-screen only by default: long lists keep hundreds of rows loaded.
+        var params: BridgeJSON = offscreen
+            ? ["visible_only": false, "max_children": 400]
+            : ["visible_only": true, "max_children": 50]
         if let filter = args["filter_text"] as? String, !filter.isEmpty {
             params["filter"] = ["text": filter]
         }
-        return guardian.guarded { _ in
+        return guardian.guarded { probe in
             switch self.raw.call("page_source", params) {
             case .failure(let message):
                 return .error(self.quoted("read_ui failed", message))
@@ -245,12 +269,46 @@ final class BridgeTools {
                 if let ocr = page["ocr_items"] as? [Any], !ocr.isEmpty {
                     text += "\n\n[text read by OCR, with tap points]\n" + Self.jsonString(ocr)
                 }
+                var notes = [Self.scrollSummary(page["scroll_position"])]
+                if offscreen, probe.pointHeight > 0 {
+                    notes.append("Off-screen elements are included: the screen is \(Int(probe.pointWidth)) x \(Int(probe.pointHeight)) points, and a frame outside it must be scrolled into view before it can be tapped.")
+                }
+                if (page["truncated"] as? Bool) == true {
+                    notes.append("The element list was cut short by the device; use filter_text to narrow it.")
+                }
                 if text.count > Self.maxUITextLength {
                     text = String(text.prefix(Self.maxUITextLength)) + "\n[truncated: use filter_text to narrow]"
                 }
-                return .text(self.quoted("Visible UI, frames in points", text))
+                let heading = (offscreen ? "UI including off-screen elements" : "Visible UI") + ", frames in points"
+                return .text(notes.joined(separator: "\n") + "\n\n" + self.quoted(heading, text))
             }
         }
+    }
+
+    /// One line on where the view is scrolled to, from the device's own
+    /// measurement. Built from numbers only, never from on-screen text.
+    static func scrollSummary(_ value: Any?) -> String {
+        guard let position = value as? BridgeJSON else {
+            return "Scroll position: not measured for this screen. It may still scroll: call scroll and check whether it moved."
+        }
+        if (position["fits_on_screen"] as? Bool) == true {
+            return "Scroll position: everything fits on screen; there is nothing to scroll."
+        }
+        guard let scrolled = number(position["scrolled_pt"]), let scrollable = number(position["scrollable_pt"]), scrollable > 0 else {
+            return "Scroll position: unknown. This app only reports what is on screen, so there may be more: call scroll and check whether it moved."
+        }
+        let above = max(0, scrolled), below = max(0, scrollable - scrolled)
+        let viewport = number(position["viewport_pt"]) ?? 0
+        func screens(_ points: Double) -> String {
+            viewport > 0 ? String(format: " (about %.1f screens)", points / viewport) : ""
+        }
+        var line = "Scroll position: about \(Int((number(position["percent"]) ?? 0).rounded()))% of the way down. "
+        line += above < 1 ? "At the top. " : "\(Int(above)) points of content above\(screens(above)). "
+        line += below < 1 ? "At the bottom." : "\(Int(below)) points below\(screens(below))."
+        if let confidence = position["confidence"] as? String, confidence != "exact" {
+            line += " This is an estimate (\(confidence)); lists that load as you go can have more than is counted."
+        }
+        return line
     }
 
     private func tap(_ args: BridgeJSON) -> BridgeToolResult {
@@ -283,6 +341,86 @@ final class BridgeTools {
                 params["y"] = y
             }
             return self.action("swipe", self.raw.call("swipe", params))
+        }
+    }
+
+    private func scroll(_ args: BridgeJSON) -> BridgeToolResult {
+        guard let direction = args["direction"] as? String,
+              ["down", "up", "left", "right"].contains(direction) else {
+            return Self.refused("direction must be down, up, left or right")
+        }
+        let points = Self.number(args["points"])
+        let pages = Self.number(args["pages"]) ?? 1
+        if let points = points, !(10...2000).contains(points) { return Self.refused("points must be between 10 and 2000") }
+        guard (0.1...3).contains(pages) else { return Self.refused("pages must be between 0.1 and 3") }
+        let x = Self.number(args["x"]), y = Self.number(args["y"])
+        let vertical = direction == "down" || direction == "up"
+
+        return guardian.guarded { probe in
+            // A plain vertical page uses the device's own paging, which is
+            // exact and reports where it ended up.
+            if vertical, points == nil, x == nil, y == nil {
+                return self.scrollOutcome(self.raw.call("page", ["direction": direction, "distance": pages]))
+            }
+            // Everything else is a slow drag of an exact length: no momentum.
+            guard probe.pointWidth > 0, probe.pointHeight > 0 else {
+                return Self.refused("screen size unknown; use direction with pages only")
+            }
+            if let y = y, !(Self.topEdgeMargin...(probe.pointHeight - Self.bottomEdgeMargin)).contains(y) {
+                return Self.refused("y is too close to the top or bottom edge, where iOS reads a drag as a system gesture")
+            }
+            let extent = vertical ? probe.pointHeight : probe.pointWidth
+            let distance = min(points ?? pages * extent * 2 / 3, extent * 0.9)
+            // Content moves opposite to the finger.
+            let finger = ["down": "up", "up": "down", "left": "right", "right": "left"][direction]!
+            var params: BridgeJSON = ["direction": finger, "distance": distance, "velocity": "slow"]
+            if let x = x { params["x"] = x }
+            if let y = y { params["y"] = y }
+            return self.scrollOutcome(self.raw.call("swipe", params))
+        }
+    }
+
+    private func scrollTo(_ args: BridgeJSON) -> BridgeToolResult {
+        guard let text = args["text"] as? String, !text.isEmpty, text.count <= 200 else {
+            return Self.refused("text is required (up to 200 characters)")
+        }
+        var params: BridgeJSON = ["element_id": text]
+        if let match = args["match"] as? String {
+            guard match == "exact" || match == "contains" else { return Self.refused("match must be exact or contains") }
+            params["match"] = match
+        }
+        return guardian.guarded { _ in
+            switch self.raw.call("scroll_to_element", params) {
+            case .failure(let message):
+                return .error(self.quoted("scroll_to failed", message))
+            case .success(let body):
+                guard (body["found"] as? Bool) == true,
+                      let x = Self.number(body["x"]) ?? Self.number(body["center_x"]),
+                      let y = Self.number(body["y"]) ?? Self.number(body["center_y"]) else {
+                    return .error("scroll_to: no such element was found after scrolling. Check the exact label with read_ui, or try match: contains.")
+                }
+                var line = "scroll_to: the element is in view. Tap it at x=\(Int(x)), y=\(Int(y))."
+                if let swipes = Self.number(body["swipes"]) { line += " Scrolled \(Int(swipes)) time(s)." }
+                return .text(line)
+            }
+        }
+    }
+
+    /// Reports a scroll from the device's numbers: did it move, and where to.
+    private func scrollOutcome(_ result: BridgeRawResult) -> BridgeToolResult {
+        switch result {
+        case .failure(let message):
+            return .error(quoted("scroll failed", message))
+        case .success(let body):
+            var lines: [String] = []
+            switch body["moved"] as? Bool {
+            case true?: lines.append("scroll: moved.")
+            case false?: lines.append("scroll: did not move. You are at the end of the content in that direction.")
+            case nil: lines.append("scroll: done. The device did not report whether the content moved; read the screen to check.")
+            }
+            if (body["at_end"] as? Bool) == true { lines.append("This is the end of the content in that direction.") }
+            if body["position"] != nil { lines.append(Self.scrollSummary(body["position"])) }
+            return .text(lines.joined(separator: "\n"))
         }
     }
 
