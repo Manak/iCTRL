@@ -1,0 +1,25 @@
+# Claude Bridge: nothing secret is ever committed.
+# Secrets live only on the phone (keychain / runner sandbox). These patterns
+# are a safety net for files that might be created on the Mac while developing.
+
+# Tailscale auth keys and tsnet state
+*.authkey
+tskey-*
+tsnet-state/
+tailscaled.state
+*.tsstate
+
+# URL secret / connector URL scratch files
+*.secret
+connector-url*.txt
+
+# Local env / config overrides
+.env
+.env.*
+Local.*.xcconfig
+
+# Go build output (the tsnet xcframework is built, not vendored)
+build/
+*.xcframework/
+*.a
+go/vendor/

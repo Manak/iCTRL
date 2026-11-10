@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Refuse to commit anything that looks like a Tailscale key or a bridge secret.
+# Enable once per clone:  git config core.hooksPath ClaudeBridge/scripts/hooks
+set -euo pipefail
+
+# Tailscale keys: tskey-auth-..., tskey-api-..., tskey-client-...
+# Connector URLs with a secret path segment: https://host.tailnet.ts.net/<43+ url-safe chars>/mcp
+PATTERN='tskey-(auth|api|client|oauth)-[A-Za-z0-9]{6,}|\.ts\.net/[A-Za-z0-9_-]{32,}/mcp'
+
+if git diff --cached -U0 --no-color | grep -E '^\+' | grep -Ev '^\+\+\+ ' | grep -Eq "$PATTERN"; then
+  echo "pre-commit: staged changes contain what looks like a Tailscale key or a connector URL secret." >&2
+  echo "Remove it (secrets belong only in the phone's keychain), then commit again." >&2
+  git diff --cached -U0 --no-color | grep -En "$PATTERN" | sed -E 's/(tskey-[a-z]+-)[A-Za-z0-9-]+/\1<redacted>/; s#(\.ts\.net/)[A-Za-z0-9_-]+#\1<redacted>#' >&2
+  exit 1
+fi
