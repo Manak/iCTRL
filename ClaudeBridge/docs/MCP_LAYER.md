@@ -230,6 +230,22 @@ the list, and the basket total changed to match.
 3. **Fall back to gestures** if the app will not jump: one call to the
    device's paging for the long stretch, then the exact drag.
 
+### Pressing an element with no touch at all: tried, not working
+
+The idea: activate the element itself through accessibility (what VoiceOver's
+double-tap does), so no coordinates and no scrolling are needed. XCTest can
+send accessibility actions to an element (`-[XCAXClient_iOS
+performAction:onElement:value:error:]` with an `XCUIAccessibilityAction`), and
+that is how the jump above works (action 2003, scroll to visible).
+
+Sending the press action (2010) to a menu item's label in Grab was refused
+with `kAXErrorFailure`, and the enclosing row gave no accessibility handle to
+try. Not established: whether 2010 is the right action on iOS 27, whether
+buttons accept it where labels do not, or whether iOS lets a test runner
+press at all. So `tap_element` still scrolls the element into view and taps
+where it is. If this is revisited, it would also be the way to act in
+large-display mode, where touches do nothing.
+
 `contains` matching finds the first element whose label contains the text,
 which can be a description rather than a title. Searching for "Veggie Delite"
 opened a meal whose description mentioned it; the exact label
