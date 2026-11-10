@@ -17,7 +17,10 @@ Rules for this list:
 
 | File | Hook | Why |
 |---|---|---|
-| _none yet_ | | Stage 1 added only new files. |
+| `iCTRLUITests/iCTRLUITests.swift` | In `testStartServer`, after `requestLocalNetworkAtLaunch()`: a 3-line call to `ClaudeBridgeRunner.shared.start { … }` that forwards to `server?.onRPCRequest`. | Starts the bridge once the raw listener is up, and hands it iCTRL's in-process RPC entry point. Does nothing unless the bridge is enabled. |
+| `iCTRLUITests/iCTRLUITests.swift` | In `testStartServer`, after `safetyTimer.invalidate()`: `ClaudeBridgeRunner.shared.stop()`. | Stops the bridge on every path that ends the run loop. |
+| `iCTRLUITests/iCTRLUITests.swift` | In `tearDownWithError`, after the log line: `ClaudeBridgeRunner.shared.stop()`. | Stops the bridge if XCTest tears the test down directly. |
+| `project.yml` | Under `iCTRLUITests` → `sources`, after `- path: iCTRLKit`: two source paths, `ClaudeBridge/Core` and `ClaudeBridge/Runner`. | Compiles the bridge into the runner. |
 
 ## New files and folders (no conflict risk)
 
@@ -29,6 +32,10 @@ Rules for this list:
 | `ClaudeBridge/scripts/hooks/pre-commit` | Blocks commits that contain a Tailscale key or a connector URL secret. |
 | `ClaudeBridge/docs/UPSTREAM_SYNC.md` | The update workflow. |
 | `ClaudeBridge/docs/VIABILITY.md` | Stage 1 findings: can tsnet run inside the runner. |
+| `ClaudeBridge/docs/MCP_LAYER.md` | Stage 2: what the MCP layer does and how to try it. |
+| `ClaudeBridge/Core/` | The bridge itself: MCP protocol, tools, allowlist guard, auth, loopback HTTP listener. Foundation and Network only. |
+| `ClaudeBridge/Runner/` | Glue to iCTRL's types: RPC adapter, keychain secret, allowlist storage. |
+| `ClaudeBridge/Tests/`, `ClaudeBridge/Package.swift` | Mac unit tests (`cd ClaudeBridge && swift test`). Not part of the iOS build. |
 
 Note: upstream already has a `Scripts/` folder. macOS file systems are
 case-insensitive by default, so a top-level `scripts/` would collide with it.

@@ -25,6 +25,8 @@ die() { echo "error: $*" >&2; exit 1; }
 
 git remote get-url upstream >/dev/null 2>&1 \
   || die "no 'upstream' remote. Run: git remote add upstream https://github.com/OpenMinis/iCTRL.git"
+# `make build` rewrites the build stamp; that is never a change worth keeping.
+git checkout -- iCTRLKit/BuildStamp.swift 2>/dev/null || true
 [ -z "$(git status --porcelain)" ] \
   || die "working tree is not clean. Commit or stash first."
 [ ! -e .git/MERGE_HEAD ] || die "a merge is already in progress."
