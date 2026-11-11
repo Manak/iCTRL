@@ -144,7 +144,7 @@ final class BridgeGuard {
     /// other things SpringBoard shows. Fails closed: home needs positive
     /// evidence (the icon grid) and no sign of the app switcher.
     private func springboardShowsHomeScreen() -> BridgeForeground {
-        let result = raw.call("page_source", [
+        let result = raw.pageSource([
             "bundle_id": Self.springboard, "visible_only": true, "max_children": 50,
         ])
         guard case .success(let page) = result, let source = page["source"] as? String else {

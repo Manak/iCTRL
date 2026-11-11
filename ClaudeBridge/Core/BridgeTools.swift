@@ -338,10 +338,10 @@ final class BridgeTools {
             : ["visible_only": true, "max_children": 1000, "max_elements": Self.maxElements]
         let startAt = max(0, Int(Self.number(args["start_at"]) ?? 0))
         if let filter = args["filter_text"] as? String, !filter.isEmpty {
-            params["filter"] = ["text": filter]
+            params["filter"] = ["text": BridgeSourceLines.deviceText(filter)]
         }
         return guardian.guarded { probe in
-            switch self.raw.call("page_source", Self.pageParams(params, probe)) {
+            switch self.raw.pageSource(Self.pageParams(params, probe)) {
             case .failure(let message):
                 return .error(self.quoted("read_ui failed", message))
             case .success(let page):
@@ -385,6 +385,9 @@ final class BridgeTools {
                 }
                 notes.append(Self.shorthandLegend(screenWidth: Int(probe.pointWidth), screenHeight: Int(probe.pointHeight),
                                                   leftOut: compacted.dropped + short.dropped))
+                if text.contains(BridgeSourceLines.lineBreak) {
+                    notes.append("\(BridgeSourceLines.lineBreak) inside a label or value is a line break in the app's text.")
+                }
                 let heading = offscreen ? "Whole page" : "Visible UI"
                 return .text(notes.joined(separator: "\n") + "\n\n" + self.quoted(heading, text))
             }
@@ -587,7 +590,7 @@ final class BridgeTools {
     private func checkElement(_ args: BridgeJSON) -> BridgeToolResult {
         guard let target = Self.elementTarget(args) else { return Self.refused("text is required (up to 200 characters); match is exact or contains; occurrence is 1 or more") }
         return guardian.guarded { probe in
-            guard case .success(let page) = self.raw.call("page_source", Self.pageParams(["visible_only": false, "max_children": 400], probe)),
+            guard case .success(let page) = self.raw.pageSource(Self.pageParams(["visible_only": false, "max_children": 400], probe)),
                   let source = page["source"] as? String else {
                 return .error("check_element: the screen could not be read.")
             }
@@ -615,7 +618,7 @@ final class BridgeTools {
                 lines.append("On screen: yes, centred at x=\(Int(map.screenX(frame.midX).rounded())), y=\(Int(map.screenY(frame.midY).rounded())).")
                 var reach = "not checked"
                 if case .allowed(let app) = probe.foreground, let test = self.isHittable {
-                    switch test(app.bundleID, target.text, target.match == .contains, target.occurrence) {
+                    switch test(app.bundleID, target.deviceText, target.match == .contains, target.occurrence) {
                     case true?: reach = "yes"
                     case false?: reach = "no, something is covering it or it is at the very edge"
                     case nil: reach = "could not be determined"
@@ -650,9 +653,12 @@ final class BridgeTools {
     // MARK: Finding elements
 
     struct ElementTarget {
+        /// As read_ui shows it, which is how the bridge's own tree has it.
         let text: String
         let match: BridgeUITree.Match
         let occurrence: Int
+        /// As the device has it, for the lookups done on the device.
+        var deviceText: String { BridgeSourceLines.deviceText(text) }
     }
 
     struct FoundElement {
@@ -703,7 +709,7 @@ final class BridgeTools {
         let key = "\(Int(app.width))x\(Int(app.height))"
         if let c = windowCache, c.key == key, clock.uptime - c.at < 4 { return c.rect }
         var rect: BridgeUITree.Rect?
-        if case .success(let page) = raw.call("page_source", ["bundle_id": BridgeGuard.springboard, "visible_only": true, "max_children": 60]),
+        if case .success(let page) = raw.pageSource(["bundle_id": BridgeGuard.springboard, "visible_only": true, "max_children": 60]),
            let source = page["source"] as? String {
             rect = BridgeWindowLocator.locate(appFrame: app, springboard: BridgeUITree(source: source))
         }
@@ -758,7 +764,7 @@ final class BridgeTools {
 
         for _ in 0..<Self.maxScrollSteps {
             if isSuperseded { return .failure(ElementError(message: BridgeGuard.supersededMessage, superseded: true)) }
-            guard case .success(let page) = raw.call("page_source", Self.pageParams(["visible_only": false, "max_children": 400], probe)),
+            guard case .success(let page) = raw.pageSource(Self.pageParams(["visible_only": false, "max_children": 400], probe)),
                   let source = page["source"] as? String else {
                 return .failure(ElementError(message: "the screen could not be read."))
             }
@@ -802,7 +808,7 @@ final class BridgeTools {
                 // element: in view by its frame is not the same as usable.
                 if scrolls > 0, !verified, case .allowed(let app) = probe.foreground, let test = isHittable {
                     verified = true
-                    if test(app.bundleID, target.text, target.match == .contains, target.occurrence) == false {
+                    if test(app.bundleID, target.deviceText, target.match == .contains, target.occurrence) == false {
                         // Covered where it stopped. Put it in the exact middle and look again.
                         let offCentre = frame.midY - (area?.midY ?? frame.midY)
                         if let area = area, abs(offCentre) > 8 {
@@ -822,7 +828,7 @@ final class BridgeTools {
                     }
                 } else if recheck, case .allowed(let app) = probe.foreground, let test = isHittable {
                     recheck = false
-                    if test(app.bundleID, target.text, target.match == .contains, target.occurrence) == false {
+                    if test(app.bundleID, target.deviceText, target.match == .contains, target.occurrence) == false {
                         return .failure(ElementError(message: "the element is in view but something is covering it, so a tap would not reach it."))
                     }
                 }
@@ -836,7 +842,7 @@ final class BridgeTools {
             // view. That is a jump, not a drag, however far away it is.
             if !triedJump, case .allowed(let app) = probe.foreground, let jump = jumpToElement {
                 triedJump = true
-                if jump(app.bundleID, target.text, target.match == .contains, target.occurrence) {
+                if jump(app.bundleID, target.deviceText, target.match == .contains, target.occurrence) {
                     scrolls += 1
                     sleep(Self.settlePause)
                     continue

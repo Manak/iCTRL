@@ -392,3 +392,81 @@ enum BridgeWindowLocator {
                                  width: window.width * scale, height: window.height * scale)
     }
 }
+
+/// Puts every element of a `page_source` text back on one line.
+///
+/// The device writes one element per line, but a label or value is written
+/// as it is, so a message with line breaks in it (a WhatsApp bubble, say)
+/// spills over several lines. Every reader here goes line by line: the
+/// spilled lines were taken for elements of their own and each piece was cut
+/// at its first comma. Here the pieces are joined again, with each line break
+/// written as `\n`.
+///
+/// A complete element line always ends with its frame, `{{x, y}, {w, h}}`.
+/// So a line that starts an element and opens a label, value or identifier
+/// but has no frame is joined with the lines after it, up to the first one
+/// that ends with a frame.
+enum BridgeSourceLines {
+    /// How a line break inside a label is shown.
+    static let lineBreak = "\\n"
+
+    private static let elementStart = try! NSRegularExpression(
+        pattern: #"^ *[A-Za-z][A-Za-z0-9]*, (label|value|id): '"#)
+    private static let frameAtEnd = try! NSRegularExpression(
+        pattern: #"\{\{-?[0-9.]+, -?[0-9.]+\}, \{-?[0-9.]+, -?[0-9.]+\}\}\s*$"#)
+
+    static func join(_ source: String) -> String {
+        guard source.contains("\n") else { return source }
+        let lines = source.components(separatedBy: "\n")
+        var out: [String] = []
+        out.reserveCapacity(lines.count)
+        var pending: [String] = []
+        var changed = false
+        for line in lines {
+            if !pending.isEmpty {
+                pending.append(line)
+                if endsWithFrame(line) {
+                    out.append(pending.map(trimReturn).joined(separator: lineBreak))
+                    pending.removeAll()
+                    changed = true
+                }
+                continue
+            }
+            if !endsWithFrame(line), matches(elementStart, line) {
+                pending = [line]
+            } else {
+                out.append(line)
+            }
+        }
+        // A spill that never reached a frame was not one: leave it as it was.
+        out.append(contentsOf: pending)
+        return changed ? out.joined(separator: "\n") : source
+    }
+
+    /// Text as the device has it, from text written the way read_ui shows it.
+    static func deviceText(_ shown: String) -> String {
+        shown.replacingOccurrences(of: lineBreak, with: "\n")
+    }
+
+    private static func endsWithFrame(_ line: String) -> Bool {
+        line.contains("}}") && matches(frameAtEnd, line)
+    }
+
+    private static func matches(_ regex: NSRegularExpression, _ line: String) -> Bool {
+        regex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) != nil
+    }
+
+    private static func trimReturn(_ piece: String) -> String {
+        piece.hasSuffix("\r") ? String(piece.dropLast()) : piece
+    }
+}
+
+extension BridgeRawAPI {
+    /// `page_source`, with each element on a line of its own.
+    func pageSource(_ params: BridgeJSON) -> BridgeRawResult {
+        let result = call("page_source", params)
+        guard case .success(var page) = result, let source = page["source"] as? String else { return result }
+        page["source"] = BridgeSourceLines.join(source)
+        return .success(page)
+    }
+}
