@@ -47,13 +47,14 @@ There is no tool that changes the allowlist.
 
 The server's instructions and the tool descriptions steer towards:
 
-- **One full `read_ui` before acting.** The default read is the whole page, so
-  a series of actions can be planned from it. Filtered reads hide the context
-  needed to choose the right element (a "contains" search for a dish name
-  matched another dish's description), and screenshots are described as a last
-  resort for pictures or for working out why something failed.
-- **Acting by label** with `tap_element`, checking with `check_element`, and
-  chaining with `run_steps`.
+- **One `read_ui` before acting.** A read outlines everything on screen and the
+  list rows around it, so a series of actions can be planned from it. Filtered
+  reads hide the context needed to choose the right element (a "contains"
+  search for a dish name matched another dish's description), and screenshots
+  are described as a last resort for pictures or for working out why something
+  failed.
+- **Acting by ref** with `tap_element`, checking with `check_element`, and
+  chaining with `run_steps`. A label still works where there is no ref.
 
 ## read_ui never cuts a page off
 
@@ -63,16 +64,12 @@ Three limits used to truncate long pages; all three are dealt with:
 |---|---|---|
 | Elements the device returns | iCTRL's default of 2000 (the bridge never asked for more), hard cap 4000 | The bridge asks for 10,000, and iCTRL's cap is raised to match (hook in `ActionHandler.swift`) |
 | Children per container | 400 | 1000 |
-| Characters in one result | 60,000, then cut with "[truncated]" | 60,000 per result, then a note with `start_at` to fetch the rest. Nothing is dropped |
+| Characters in one result | 60,000, then cut with "[truncated]" | About 12,000 of outline per result. Rows that do not fit are named by range, with the `rows` argument that reads them. Nothing is dropped |
 
-Unnamed containers (`Other`, `Window` or `Group` with no label, value,
-identifier or state) are left out of the text, and indentation is recomputed.
-They carry no information and are a quarter or more of a real page.
-
-Measured on the phone, Grab's Subway menu: 5,327 elements, 1,332 of them
-unnamed containers, leaving 3,995 lines returned over six results (about
-307,000 characters in all). The old limits stopped at 2,000 elements and
-60,000 characters.
+The element tools read the page with the same limits as `read_ui`, so a ref is
+looked up in the same page it was read from. (At a lower child limit the device
+took another path on Grab's menu page and left out the navigation bar's back
+button altogether.)
 
 If a page really has more than 10,000 elements, the result says the end is
 missing and to scroll further and read again.
@@ -372,20 +369,57 @@ Diagnostics for this work are behind environment variables:
 decision's inputs), `ICTRL_BRIDGE_DIAG_APPS=1` (per-app state and pid),
 `ICTRL_BRIDGE_DIAG_TREES=1` (candidate window frames in SpringBoard's tree).
 
-## read_ui shorthand
+## read_ui outline
 
-`read_ui` returns the tree in a short notation (`ClaudeBridge/Core/BridgeShorthand.swift`).
-Only the system-written parts are shortened; labels and values from the screen are untouched.
+`read_ui` returns an outline of the screen (`ClaudeBridge/Core/BridgeOutline.swift`).
+The device sends its UI tree as text, one element per line; the bridge parses that
+once (`BridgeUITree`) and everything after works on the parsed elements, so no
+text is parsed and rewritten again. The outline is built in one pass:
 
-    <indent>TYPE 'label' ='value' #identifier flags frame
+- **Regions**, in screen order: alerts and sheets, the top (navigation bar or
+  anything in the top 15% of the screen), each scrolling list, other content,
+  then toolbars, the tab bar and the bottom.
+- **One line per list row**: the row's texts in reading order, and the controls
+  inside it in brackets.
+- **Left out**: unnamed containers, scroll bars, text-selection handles, keyboard
+  keys, invisible direction marks, and identifiers except on a control whose text
+  says nothing by itself ("49" #BackButton).
+- **Said once**: text already shown by a container, a sibling or a control is not
+  shown again; where a container and a control inside it say the same (also as
+  label plus value), the control is kept; two controls stacked in one place, or
+  the same words drawn twice in one place, show once.
+- **Refs** (`e3` for elements, `r12` for rows) for `tap_element`, `scroll_to` and
+  `check_element`. A ref is looked up again by what it was (its kind, its words,
+  and which of the same it was), so it still works after the list has moved; if
+  the screen has changed, the tool says so and nothing is tapped.
+- **A tap point** `(x,y)` in screen points, the middle of the part that shows,
+  only for what is on screen.
 
-- Types: `T` text, `B` button, `I` image, `C` cell, `O` other, `L` link, `F` text field, `S` switch; others spelled out.
-- An identifier used three or more times is listed once in the `ids:` line and written `$n`.
-- Flags: `*` probably tappable, `dis` disabled, `sel` selected.
-- Frame `x,y,w,h`: on screen, in screen points. `~x,y`: rough centre of something off screen.
-  No frame: off screen with its parent.
-- Text and image elements with no label, value or identifier are left out, like unnamed containers.
+A line reads:
 
-Measured on a long Grab menu (3,995 elements): 308,000 characters over six results before,
-93,000 over two after. The bridge's own finding, scrolling and tapping still work from the
-device's full text, so nothing is lost for `tap_element`, `scroll_to` or `check_element`.
+    e5 button "Add" · "S$0.00" #identifier = "value" disabled (355,325)
+    r14 "Dish name" · "Description" · "5.50" · [e40 button "Add"] (197,290)
+
+A read covers everything outside lists, and for each list the rows on screen plus
+the rows nearest them, taken in turns above and below until the budget is spent.
+It grows from the run of on-screen rows that covers most of the screen, because
+apps list some things out of order: Grab lists a copy of its menu header after
+the last dish and draws it at the top. Every stretch of rows left out is named
+with the call that reads it, e.g. `read_ui rows:"r44-r133"`. `visible_only`
+shows only what is on screen and `filter_text` only what contains a text; both
+still read the whole page, so refs mean the same in every kind of read.
+
+The device's text has one limit no parser can remove: labels are written
+without escaping. A label containing `', value: '` or `', id: '`, or a line
+inside a label that ends exactly like a frame, cannot be told from the real
+thing. A randomized test (`testParserRoundTripsAwkwardText`) checks everything
+else: quotes, commas, braces, state words and line breaks inside labels.
+
+Measured on the phone:
+
+| Screen | Before (old read) | After |
+|---|---|---|
+| WhatsApp chat, 15 messages | 5,800 characters | 2,900, every message whole |
+| Grab home | | 1,700 |
+| Carousell home | | 1,900 |
+| Grab menu, 151 rows | not measured (a larger Grab menu, 3,995 elements, was 93,000 over two results) | 12,500: the screen and 43 rows around it, the rest named by range |

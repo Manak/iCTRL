@@ -52,17 +52,9 @@ final class MultiLineLabelTests: XCTestCase {
         h.raw.foreground = whatsApp
         h.raw.results["page_source"] = .success(["source": chat])
         let text = h.call("read_ui").firstText
-        // One line, under its cell, followed by its frame.
-        XCTAssertTrue(text.contains("\n   O '\(fullMessage)' 13,-105,"), text)
-        XCTAssertTrue(text.contains("\\n inside a label or value is a line break"), text)
-        XCTAssertFalse(text.contains("label: '"), "no line falls through unparsed: \(text)")
-    }
-
-    func testNoLineBreakNoteWhenThereAreNone() {
-        let h = Harness()
-        h.raw.foreground = whatsApp
-        h.raw.results["page_source"] = .success(["source": "Application, label: 'A', {{0, 0}, {466, 678}}"])
-        XCTAssertFalse(h.call("read_ui").firstText.contains("is a line break"))
+        // One row, its line breaks written as \n.
+        XCTAssertTrue(text.contains("  r1 \"\(fullMessage)\" ("), text)
+        XCTAssertTrue(text.contains("  r2 \"Your message, Ok, 10:09, Sent to Alex\" ("), text)
     }
 
     func testElementLookupsMatchTheTextAsShown() {
@@ -76,11 +68,13 @@ final class MultiLineLabelTests: XCTestCase {
         // The bridge's own tree has the label as read_ui shows it…
         let text = h.call("check_element", ["text": "court 3.\\n\\n•  Bring water", "match": "contains"]).firstText
         XCTAssertTrue(text.contains("check_element: found"), text)
-        // …and the device, which has the real line breaks, is asked with those.
-        XCTAssertEqual(asked.last, "court 3.\n\n•  Bring water")
-        // The filter is applied on the device, so it gets real line breaks too.
-        _ = h.call("read_ui", ["filter_text": "court 3.\\n"])
-        let filter = h.raw.calls.last { $0.method == "page_source" && $0.params["filter"] != nil }?.params["filter"] as? BridgeJSON
-        XCTAssertEqual(filter?["text"] as? String, "court 3.\n")
+        // …and the device is asked for that element by its whole label, as
+        // the app has it, with real line breaks.
+        XCTAssertEqual(asked.last, BridgeSourceLines.deviceText(fullMessage))
+        // A filter is applied by the bridge, to the text as shown.
+        let filtered = h.call("read_ui", ["filter_text": "court 3.\\n"]).firstText
+        XCTAssertTrue(filtered.contains("Bring water"), filtered)
+        XCTAssertFalse(filtered.contains("Your message, Ok"), filtered)
+        XCTAssertNil(h.raw.calls.last { $0.method == "page_source" }?.params["filter"])
     }
 }

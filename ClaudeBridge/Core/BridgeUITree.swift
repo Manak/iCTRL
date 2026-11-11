@@ -43,47 +43,113 @@ struct BridgeUITree {
     }
 
     private(set) var nodes: [Node] = []
+    /// Each node's children, by index, in order.
+    private(set) var children: [[Int]] = []
 
     private static let frameRegex = try! NSRegularExpression(
-        pattern: #"\{\{(-?[0-9.]+), (-?[0-9.]+)\}, \{(-?[0-9.]+), (-?[0-9.]+)\}\}\s*$"#)
+        pattern: #"\{\{(-?[0-9.]+), (-?[0-9.]+)\}, \{(-?[0-9.]+), (-?[0-9.]+)\}\}$"#)
 
+    /// Parses the device's text in one pass. Lines that are not elements
+    /// (anything without a frame at the end) are skipped.
     init(source: String) {
         var stack: [(depth: Int, index: Int)] = []
-        for line in source.components(separatedBy: "\n") {
-            let range = NSRange(line.startIndex..., in: line)
-            guard let match = Self.frameRegex.firstMatch(in: line, range: range) else { continue }
-            func number(_ i: Int) -> Double {
-                Range(match.range(at: i), in: line).flatMap { Double(line[$0]) } ?? 0
-            }
-            let frame = Rect(x: number(1), y: number(2), width: number(3), height: number(4))
-            let indent = line.prefix { $0 == " " }.count
-            let head = String(line[line.index(line.startIndex, offsetBy: indent)..<Range(match.range, in: line)!.lowerBound])
-            let type = head.split(separator: ",", maxSplits: 1).first.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
-
-            while let last = stack.last, last.depth >= indent { stack.removeLast() }
-            var node = Node(index: nodes.count, depth: indent, type: type,
-                            label: Self.field("label", in: head), value: Self.field("value", in: head),
-                            identifier: Self.field("id", in: head), frame: frame, parent: stack.last?.index)
-            // State words sit between the last field and the frame.
-            let tail = head.components(separatedBy: "', ").last ?? head
-            node.disabled = tail.contains(", disabled") || tail.hasPrefix("disabled")
-            node.selected = tail.contains(", selected") || tail.hasPrefix("selected")
+        for line in BridgeSourceLines.join(source).components(separatedBy: "\n") {
+            guard let parsed = Self.parse(line) else { continue }
+            while let last = stack.last, last.depth >= parsed.indent { stack.removeLast() }
+            var node = Node(index: nodes.count, depth: parsed.indent, type: parsed.type,
+                            label: parsed.label, value: parsed.value, identifier: parsed.identifier,
+                            frame: parsed.frame, parent: stack.last?.index)
+            node.disabled = parsed.disabled
+            node.selected = parsed.selected
             nodes.append(node)
-            stack.append((indent, node.index))
+            children.append([])
+            if let parent = node.parent { children[parent].append(node.index) }
+            stack.append((parsed.indent, node.index))
         }
     }
 
-    /// Reads `name: '…'` from a tree line. Values may contain commas and
-    /// quotes, so the end is the quote that precedes the next field or the frame.
-    private static func field(_ name: String, in head: String) -> String? {
-        guard let start = head.range(of: ", \(name): '") else { return nil }
-        let rest = head[start.upperBound...]
-        var end = rest.endIndex
-        for terminator in ["', label: '", "', value: '", "', id: '", "', "] {
-            if let r = rest.range(of: terminator), r.lowerBound < end { end = r.lowerBound }
+    struct ParsedLine: Equatable {
+        var indent: Int
+        var type: String
+        var label: String?
+        var value: String?
+        var identifier: String?
+        var disabled = false
+        var selected = false
+        var frame: Rect
+    }
+
+    /// One element line:
+    ///
+    ///     <indent>Type[, label: '…'][, value: '…'][, id: '…'][, disabled][, selected], {{x, y}, {w, h}}
+    ///
+    /// Read from both ends: the frame is last and the state words come just
+    /// before it, so neither is looked for inside the text. A label ends only
+    /// where the next field begins (`', value: '` or `', id: '`) or at the
+    /// final quote, so commas and quotes inside it do not cut it short.
+    static func parse(_ line: String) -> ParsedLine? {
+        let range = NSRange(line.startIndex..., in: line)
+        guard let match = frameRegex.firstMatch(in: line, range: range),
+              let frameRange = Range(match.range, in: line) else { return nil }
+        func number(_ i: Int) -> Double {
+            Range(match.range(at: i), in: line).flatMap { Double(line[$0]) } ?? 0
         }
-        if end == rest.endIndex, rest.hasSuffix("'") { end = rest.index(before: rest.endIndex) }
-        return String(rest[..<end])
+        let frame = Rect(x: number(1), y: number(2), width: number(3), height: number(4))
+        let indent = line.prefix { $0 == " " }.count
+        var head = Substring(line[line.index(line.startIndex, offsetBy: indent)..<frameRange.lowerBound])
+        guard head.hasSuffix(", ") else { return nil }
+        head = head.dropLast(2)
+
+        let type = head.prefix { $0 != "," }
+        guard !type.isEmpty, type.allSatisfy({ $0.isLetter || $0.isNumber }) else { return nil }
+        var parsed = ParsedLine(indent: indent, type: String(type), frame: frame)
+        var rest = head.dropFirst(type.count)
+
+        // State words, from the end. Inside a field they would be followed
+        // by its closing quote, so they cannot be mistaken here.
+        while let word = [", disabled", ", selected", ", tappable"].first(where: { rest.hasSuffix($0) }) {
+            rest = rest.dropLast(word.count)
+            if word == ", disabled" { parsed.disabled = true }
+            if word == ", selected" { parsed.selected = true }
+        }
+
+        // Fields, in their fixed order.
+        let fields: [(key: String, next: [String])] = [
+            ("label", ["', value: '", "', id: '"]), ("value", ["', id: '"]), ("id", []),
+        ]
+        for (key, next) in fields {
+            let opener = ", \(key): '"
+            guard rest.hasPrefix(opener) else { continue }
+            let body = rest.dropFirst(opener.count)
+            var end: Substring.Index?
+            for terminator in next {
+                if let r = body.range(of: terminator), r.lowerBound < (end ?? body.endIndex) { end = r.lowerBound }
+            }
+            let text: Substring
+            if let end = end {
+                text = body[..<end]
+                rest = body[body.index(after: end)...]   // keep the ", next: '" part
+            } else {
+                text = body.hasSuffix("'") ? body.dropLast() : body
+                rest = ""
+            }
+            switch key {
+            case "label": parsed.label = String(text)
+            case "value": parsed.value = String(text)
+            default: parsed.identifier = String(text)
+            }
+        }
+        // Anything left over is a field this parser does not know; the
+        // element is still kept with what was read.
+        return parsed
+    }
+
+    /// A node's label as shown: without invisible direction marks, and empty
+    /// when it only repeats the element's type ("Toolbar", "Tab Bar").
+    func text(of node: Node) -> String {
+        let label = BridgeText.clean(node.label)
+        let squeezed = label.replacingOccurrences(of: " ", with: "")
+        return squeezed.caseInsensitiveCompare(node.type) == .orderedSame ? "" : label
     }
 
     /// The app's own drawing area: the frame of the root node.
@@ -94,16 +160,34 @@ struct BridgeUITree {
     enum Match { case exact, contains }
 
     /// Nodes whose label or identifier matches, best candidates first:
-    /// label matches before identifier matches, in document order.
+    /// label matches before identifier matches, in document order. Invisible
+    /// direction marks are ignored on both sides, since read_ui leaves them out.
     func find(_ text: String, match: Match) -> [Node] {
-        let wanted = text.lowercased()
+        let wanted = BridgeText.clean(text).lowercased()
+        guard !wanted.isEmpty else { return [] }
         func hit(_ candidate: String?) -> Bool {
-            guard let c = candidate?.lowercased(), !c.isEmpty else { return false }
+            let c = BridgeText.clean(candidate).lowercased()
+            guard !c.isEmpty else { return false }
             return match == .exact ? c == wanted : c.contains(wanted)
         }
         let byLabel = nodes.filter { hit($0.label) }
         let byID = nodes.filter { !hit($0.label) && hit($0.identifier) }
         return byLabel + byID
+    }
+
+    /// How the device can find the same node: by its label as the app has it
+    /// (else its identifier), and which match it is in document order. The
+    /// device compares label and identifier alike, ignoring case. nil when
+    /// the node has neither.
+    func deviceQuery(for node: Node) -> (text: String, occurrence: Int)? {
+        let key = (node.label?.isEmpty == false ? node.label : node.identifier) ?? ""
+        guard !key.isEmpty else { return nil }
+        let lower = key.lowercased()
+        // The device searches the app's descendants, so the app itself does not count.
+        let before = nodes[1..<max(1, node.index)].filter {
+            $0.label?.lowercased() == lower || $0.identifier?.lowercased() == lower
+        }.count
+        return (BridgeSourceLines.deviceText(key), before + 1)
     }
 
     private func ancestor(of node: Node, where test: (Node) -> Bool) -> Node? {
@@ -128,16 +212,29 @@ struct BridgeUITree {
     }
 
     /// Where the node really is. A node's own frame is trusted only if it
-    /// lies inside its row; otherwise the row's frame is used, because
-    /// children of off-screen rows can report a bogus frame.
+    /// lies inside its row, top to bottom; otherwise the row's frame is
+    /// used, because children of off-screen rows can report a bogus frame
+    /// (the list's origin). Only the height is checked: a row that scrolls
+    /// sideways really does have children beyond its edges.
     func effectiveFrame(of node: Node) -> Rect {
-        guard let cell = node.type == "Cell" ? node : ancestor(of: node, where: { $0.type == "Cell" }) else {
+        guard let row = row(of: node), row.index != node.index else { return node.frame }
+        if !node.frame.isEmpty, node.frame.midY >= row.frame.y, node.frame.midY <= row.frame.maxY {
             return node.frame
         }
-        if !node.frame.isEmpty, cell.frame.contains(x: node.frame.midX, y: node.frame.midY) {
-            return node.frame
+        return row.frame
+    }
+
+    /// The row a node belongs to: the nearest cell, or else the nearest
+    /// element placed directly in a list.
+    func row(of node: Node) -> Node? {
+        var current: Node? = node
+        var placed: Node?
+        while let n = current {
+            if n.type == "Cell" { return n }
+            if placed == nil, let p = n.parent, Self.scrollTypes.contains(nodes[p].type) { placed = n }
+            current = n.parent.map { nodes[$0] }
         }
-        return cell.frame
+        return placed
     }
 
     /// The part of the screen in which a node's scrolling view shows content.
@@ -171,83 +268,16 @@ enum BridgeTappableHint {
     static let identifierWords: Set<String> = ["button", "btn", "tab", "cta", "link", "toggle", "checkbox", "radiobutton", "chip"]
 
     static func isLikelyTappable(_ node: BridgeUITree.Node) -> Bool {
-        guard !node.disabled, !node.frame.isEmpty else { return false }
+        !node.disabled && isControl(node)
+    }
+
+    /// A control, whether it can be used right now or is greyed out.
+    static func isControl(_ node: BridgeUITree.Node) -> Bool {
+        guard !node.frame.isEmpty else { return false }
         if types.contains(node.type) { return true }
         guard let id = node.identifier?.lowercased() else { return false }
         let parts = id.split(whereSeparator: { !$0.isLetter })
         return parts.contains { identifierWords.contains(String($0)) }
-    }
-
-    /// Adds ", tappable" before the frame of each line that qualifies.
-    static func annotate(_ source: String) -> String {
-        let tree = BridgeUITree(source: source)
-        var marked = Set<Int>()
-        for node in tree.nodes where isLikelyTappable(node) { marked.insert(node.index) }
-        guard !marked.isEmpty else { return source }
-        var out: [String] = []
-        var index = 0
-        for line in source.components(separatedBy: "\n") {
-            // Only lines that end in a frame are nodes, in the same order.
-            guard let frame = line.range(of: ", {{", options: .backwards), line.hasSuffix("}}") else {
-                out.append(line)
-                continue
-            }
-            if marked.contains(index) {
-                out.append(line.replacingCharacters(in: frame.lowerBound..<frame.lowerBound, with: ", tappable"))
-            } else {
-                out.append(line)
-            }
-            index += 1
-        }
-        return out.joined(separator: "\n")
-    }
-}
-
-/// Removes the lines of a UI tree that carry no information.
-///
-/// Apps nest their content in many unnamed containers. On a real page well
-/// over half the lines are `Other, {{…}}` with no label, value or identifier:
-/// they say nothing to a reader and they are what makes a page too long to
-/// return in one piece. Containers that mean something (lists, cells, bars,
-/// anything named or with a state) are kept, and indentation is recomputed
-/// from the lines that remain.
-enum BridgeTreeCompactor {
-    static let structuralTypes: Set<String> = ["Other", "Window", "Group", "Any"]
-
-    static func keeps(_ node: BridgeUITree.Node) -> Bool {
-        if node.parent == nil { return true }
-        if !structuralTypes.contains(node.type) { return true }
-        if !(node.label ?? "").isEmpty || !(node.value ?? "").isEmpty || !(node.identifier ?? "").isEmpty { return true }
-        return node.selected || node.disabled
-    }
-
-    /// Returns the kept lines, re-indented, and how many were dropped.
-    static func compact(_ source: String) -> (lines: [String], dropped: Int) {
-        let tree = BridgeUITree(source: source)
-        var depth: [Int] = []          // depth among kept lines, per node
-        var kept: [Bool] = []
-        for node in tree.nodes {
-            let keep = keeps(node)
-            let parentDepth = node.parent.map { depth[$0] + (kept[$0] ? 1 : 0) } ?? 0
-            depth.append(parentDepth)
-            kept.append(keep)
-        }
-        var out: [String] = []
-        var dropped = 0
-        var index = 0
-        for line in source.components(separatedBy: "\n") {
-            guard line.range(of: ", {{", options: .backwards) != nil, line.hasSuffix("}}"), index < tree.nodes.count else {
-                if !line.isEmpty { out.append(line) }
-                continue
-            }
-            if kept[index] {
-                out.append(String(repeating: "  ", count: depth[index]) + line.drop { $0 == " " })
-            } else {
-                dropped += 1
-            }
-            index += 1
-        }
-        return (out, dropped)
     }
 }
 
@@ -295,25 +325,6 @@ struct BridgeCoordinateMap: Equatable {
     /// A length along x or y (no offset).
     func screenWidth(_ w: Double) -> Double { w * scaleX }
     func screenHeight(_ h: Double) -> Double { h * scaleY }
-
-    /// Rewrites every frame in a `page_source` text into screen points.
-    func rescale(_ source: String) -> String {
-        guard !isIdentity else { return source }
-        let regex = try! NSRegularExpression(pattern: #"\{\{(-?[0-9.]+), (-?[0-9.]+)\}, \{(-?[0-9.]+), (-?[0-9.]+)\}\}"#)
-        let ns = source as NSString
-        var out = ""
-        var cursor = 0
-        for match in regex.matches(in: source, range: NSRange(location: 0, length: ns.length)) {
-            out += ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor))
-            let v = (1...4).map { Double(ns.substring(with: match.range(at: $0))) ?? 0 }
-            let x = Int(screenX(v[0]).rounded()), y = Int(screenY(v[1]).rounded())
-            let w = Int(screenWidth(v[2]).rounded()), h = Int(screenHeight(v[3]).rounded())
-            out += "{{\(x), \(y)}, {\(w), \(h)}}"
-            cursor = match.range.location + match.range.length
-        }
-        out += ns.substring(from: cursor)
-        return out
-    }
 }
 
 /// What the runner found on screen by asking iOS which process owns the
@@ -413,7 +424,7 @@ enum BridgeSourceLines {
     private static let elementStart = try! NSRegularExpression(
         pattern: #"^ *[A-Za-z][A-Za-z0-9]*, (label|value|id): '"#)
     private static let frameAtEnd = try! NSRegularExpression(
-        pattern: #"\{\{-?[0-9.]+, -?[0-9.]+\}, \{-?[0-9.]+, -?[0-9.]+\}\}\s*$"#)
+        pattern: #"\{\{-?[0-9.]+, -?[0-9.]+\}, \{-?[0-9.]+, -?[0-9.]+\}\}$"#)
 
     static func join(_ source: String) -> String {
         guard source.contains("\n") else { return source }

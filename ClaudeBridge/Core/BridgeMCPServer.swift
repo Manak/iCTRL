@@ -22,12 +22,12 @@ final class BridgeMCPServer {
     static let instructions =
         "Controls one iPhone, limited to the apps returned by list_allowed_apps plus the home screen and search. " +
         "Call phone_status first. " +
-        "Look with read_ui, and read the whole page (the default) before acting: it lists everything the app has loaded, " +
-        "with each element's state, so you can plan several actions from one read. Do not rely on filtered reads to " +
-        "explore, and do not use screenshot unless read_ui cannot show what you need or you are working out why " +
-        "something failed. " +
-        "Act on labelled elements with tap_element, which scrolls them into view first; use check_element to see " +
-        "whether one is reachable; chain actions with run_steps. " +
+        "Look with read_ui before acting: it outlines the screen by region, with every element and list row, its " +
+        "state and a ref, and the rows around what is on screen, so you can plan several actions from one read. " +
+        "Do not rely on filtered reads to explore, and do not use screenshot unless read_ui cannot show what you " +
+        "need or you are working out why something failed. " +
+        "Act with tap_element and a ref from read_ui; it scrolls the element into view first. Use check_element to " +
+        "see whether one is reachable, and chain actions with run_steps. " +
         "Action calls are not queued: sending a new action (tap, tap_element, swipe, scroll, scroll_to, type_text, " +
         "launch_app, open_url, go_home, run_steps) stops the action still in progress, which returns 'stopped'. What it " +
         "had already done stands. So wait for an action's result before sending the next, unless you mean to replace " +
